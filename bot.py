@@ -18,9 +18,11 @@ ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", 0))
 PORT = int(os.environ.get("PORT", 8000))
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 
+# Persistent lookup dictionaries in RAM
 user_to_thread = {}
 thread_to_user = {}
 
@@ -83,7 +85,7 @@ def serve_shop():
     if os.path.exists("templates/index.html"):
         with open("templates/index.html", "r", encoding="utf-8") as f:
             return f.read()
-    return "<h3>templates/index.html not found. Please add the file.</h3>"
+    return "<h3>templates/index.html not found. Please ensure the file exists.</h3>"
 
 
 @api.get("/api/products")
@@ -94,26 +96,44 @@ def get_products():
 @api.post("/api/checkout")
 async def checkout(request: Request):
     data = await request.json()
-    user_id = data.get("user_id")
+    raw_user_id = data.get("user_id")
     order_summary = data.get("summary", "")
     customer_name = data.get("customer_name", "Guest")
     phone = data.get("phone", "N/A")
     address = data.get("address", "N/A")
     total = data.get("total", 0.0)
 
+    user_id = int(raw_user_id) if raw_user_id else None
+    thread_id = None
+
+    # Auto-create or find existing topic
+    if user_id:
+        if user_id in user_to_thread:
+            thread_id = user_to_thread[user_id]
+        else:
+            try:
+                topic = await tg_app.bot.create_forum_topic(
+                    chat_id=ADMIN_GROUP_ID,
+                    name=f"🌸 {customer_name[:18]} ({user_id})",
+                )
+                thread_id = topic.message_thread_id
+                user_to_thread[user_id] = thread_id
+                thread_to_user[thread_id] = user_id
+            except Exception as e:
+                logging.error(f"Error creating topic during checkout: {e}")
+
     order_card = (
         f"🛍️ *NEW IN-APP ORDER SUBMITTED*\n"
         f"────────────────────\n"
         f"• Customer: {customer_name}\n"
+        f"• Telegram ID: `{user_id if user_id else 'Direct Web'}`\n"
         f"• Phone: `{phone}`\n"
         f"• Location: {address}\n"
         f"• Total: *${total:.2f}*\n\n"
         f"*Items:*\n{order_summary}\n"
         f"────────────────────\n"
-        f"⚠️ Check ABA Mobile / Merchant App to confirm payment before preparing."
+        f"💬 *Action:* Reply directly in this topic to message the customer!"
     )
-
-    thread_id = user_to_thread.get(user_id) if user_id else None
 
     try:
         if thread_id:
@@ -123,14 +143,26 @@ async def checkout(request: Request):
                 text=order_card,
                 parse_mode="Markdown",
             )
+            # Send immediate receipt confirmation into the customer's private chat
+            await tg_app.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "🌸 *Piece & Petal Order Received!*\n\n"
+                    f"អរគុណបង {customer_name}! ក្រុមការងារបានទទួលការបញ្ជាទិញតម្លៃ *${total:.2f}* រួចរាល់ហើយ។\n\n"
+                    "យើងខ្ញុំកំពុងពិនិត្យការទូទាត់ប្រាក់ (Payment Confirmation) "
+                    "ហើយនឹងឆ្លើយតបបញ្ជាក់ជូនបងនៅទីនេះភ្លាមៗណា៎ ✨"
+                ),
+                parse_mode="Markdown",
+            )
         else:
+            # Fallback if accessed purely from an external browser without Telegram WebApp context
             await tg_app.bot.send_message(
                 chat_id=ADMIN_GROUP_ID,
                 text=order_card,
                 parse_mode="Markdown",
             )
     except Exception as e:
-        logging.error(f"Error forwarding checkout order: {e}")
+        logging.error(f"Error sending order alert: {e}")
 
     return {"status": "success"}
 
@@ -216,11 +248,27 @@ async def reply_from_admin_topic(update: Update, context: ContextTypes.DEFAULT_T
     if not update.message:
         return
 
-    thread_id = update.message.message_thread_id
-    if not thread_id or thread_id not in thread_to_user:
+    # Ignore messages sent by the bot itself
+    if update.effective_user and update.effective_user.is_bot:
         return
 
-    customer_id = thread_to_user[thread_id]
+    thread_id = update.message.message_thread_id
+
+    # If it's sent in the General thread (None), ignore
+    if not thread_id:
+        return
+
+    customer_id = thread_to_user.get(thread_id)
+
+    if not customer_id:
+        logging.warning(f"No mapping found for message_thread_id: {thread_id}")
+        await update.message.reply_text(
+            "⚠️ *Warning:* Mapping not found for this topic (likely due to a server redeploy/restart).\n"
+            "Ask the customer to send any text in the bot chat to re-link.",
+            parse_mode="Markdown",
+        )
+        return
+
     try:
         await context.bot.copy_message(
             chat_id=customer_id,
@@ -228,7 +276,8 @@ async def reply_from_admin_topic(update: Update, context: ContextTypes.DEFAULT_T
             message_id=update.message.message_id,
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Failed to send to customer: {e}")
+        logging.error(f"Failed to copy message to customer {customer_id}: {e}")
+        await update.message.reply_text(f"❌ Failed to deliver message: {e}")
 
 
 async def main():
