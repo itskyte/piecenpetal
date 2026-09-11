@@ -41,10 +41,10 @@ tg_app = None
 api = FastAPI()
 
 
-@api.get("/")
-@api.get("/health")
+@api.api_route("/", methods=["GET", "HEAD"])
+@api.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
-    return {"status": "ok", "app": "Piece & Petal Combined Store & Bot"}
+  return {"status": "ok", "app": "Piece & Petal Combined Store & Bot"}
 
 
 @api.get("/shop", response_class=HTMLResponse)
