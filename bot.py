@@ -1,7 +1,9 @@
 import asyncio
 import csv
 from contextlib import asynccontextmanager
+from datetime import datetime
 import io
+import json
 import logging
 import os
 from fastapi import FastAPI, Request
@@ -29,6 +31,9 @@ CSV_EXPORT_URL = (
     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
 )
 
+# Optional: Paste your Google Apps Script Webhook URL here or in Render Env
+ORDER_WEBHOOK_URL = os.environ.get("ORDER_WEBHOOK_URL", "")
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -36,13 +41,40 @@ logging.basicConfig(
 
 user_to_thread = {}
 thread_to_user = {}
+CUSTOMER_DB_FILE = "customers.json"
+
+
+def save_customer(user_id: int):
+  try:
+    data = []
+    if os.path.exists(CUSTOMER_DB_FILE):
+      with open(CUSTOMER_DB_FILE, "r") as f:
+        data = json.load(f)
+    if user_id not in data:
+      data.append(user_id)
+      with open(CUSTOMER_DB_FILE, "w") as f:
+        json.dump(data, f)
+  except Exception as e:
+    logging.error(f"Error saving customer: {e}")
+
+
+def get_all_customers() -> list:
+  if os.path.exists(CUSTOMER_DB_FILE):
+    try:
+      with open(CUSTOMER_DB_FILE, "r") as f:
+        return json.load(f)
+    except Exception:
+      return []
+  return []
+
 
 tg_app = None
 
 
-# Handlers
 async def ensure_user_topic(user, context: ContextTypes.DEFAULT_TYPE) -> int:
   user_id = user.id
+  save_customer(user_id)
+
   if user_id not in user_to_thread:
     topic_name = f"🌸 {user.full_name[:18]} ({user_id})"
     try:
@@ -97,6 +129,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text="⚡ *Customer tapped /start*",
         parse_mode="Markdown",
     )
+
+
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  # Admin only command
+  if not update.effective_chat or update.effective_chat.id != ADMIN_GROUP_ID:
+    return
+
+  msg_text = " ".join(context.args)
+  if not msg_text:
+    await update.message.reply_text(
+        "Usage: `/broadcast Hello everyone! Drop 02 is now live!`",
+        parse_mode="Markdown",
+    )
+    return
+
+  customers = get_all_customers()
+  sent = 0
+  for uid in customers:
+    try:
+      await context.bot.send_message(
+          chat_id=uid, text=msg_text, parse_mode="Markdown"
+      )
+      sent += 1
+      await asyncio.sleep(0.05)
+    except Exception:
+      pass
+
+  await update.message.reply_text(
+      f"📢 Broadcast sent to *{sent}/{len(customers)}* customers.",
+      parse_mode="Markdown",
+  )
 
 
 async def forward_to_admin_topic(
@@ -159,6 +222,7 @@ async def lifespan(app: FastAPI):
   tg_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
   tg_app.add_handler(CommandHandler("start", start))
+  tg_app.add_handler(CommandHandler("broadcast", broadcast))
   tg_app.add_handler(
       MessageHandler(
           filters.ChatType.PRIVATE & ~filters.COMMAND,
@@ -188,7 +252,6 @@ async def lifespan(app: FastAPI):
 
 api = FastAPI(lifespan=lifespan)
 
-# Mount templates directory so local images can be loaded
 if os.path.exists("templates"):
   api.mount("/static", StaticFiles(directory="templates"), name="static")
 
@@ -262,6 +325,7 @@ async def checkout(request: Request):
   thread_id = None
 
   if user_id:
+    save_customer(user_id)
     if user_id in user_to_thread:
       thread_id = user_to_thread[user_id]
     else:
@@ -276,6 +340,26 @@ async def checkout(request: Request):
       except Exception as e:
         logging.error(f"Error creating topic during checkout: {e}")
 
+  # 1. Forward to Google Sheets Orders Tab (if Webhook configured)
+  if ORDER_WEBHOOK_URL:
+    try:
+      order_payload = {
+          "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+          "customer_name": customer_name,
+          "user_id": str(user_id or "Direct Web"),
+          "phone": phone,
+          "address": address,
+          "total": total,
+          "summary": order_summary,
+      }
+      async with httpx.AsyncClient(
+          timeout=5.0, follow_redirects=True
+      ) as client:
+        await client.post(ORDER_WEBHOOK_URL, json=order_payload)
+    except Exception as e:
+      logging.error(f"Failed to sync order to Google Sheets: {e}")
+
+  # 2. Alert Admin Forum
   order_card = (
       f"🛍️ *NEW IN-APP ORDER SUBMITTED*\n"
       f"────────────────────\n"
