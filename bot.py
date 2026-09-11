@@ -11,9 +11,10 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import httpx
 import uvicorn
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -23,7 +24,6 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", 0))
 PORT = int(os.environ.get("PORT", 8000))
-# Default to your Render domain if RENDER_EXTERNAL_URL is not set
 RENDER_URL = os.environ.get(
     "RENDER_EXTERNAL_URL", "https://piecenpetal-bot.onrender.com"
 ).rstrip("/")
@@ -73,7 +73,7 @@ def get_all_customers() -> list:
 tg_app = None
 
 
-# Handlers
+# Helpers & Handlers
 async def ensure_user_topic(user, context: ContextTypes.DEFAULT_TYPE) -> int:
   user_id = user.id
   save_customer(user_id)
@@ -164,6 +164,73 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
   )
 
 
+async def handle_order_actions(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+):
+  """Handles one-tap order confirmation or rejection from the admin forum."""
+  query = update.callback_query
+  await query.answer()
+
+  data = query.data.split(":")
+  action = data[0]
+  user_id = int(data[1])
+  admin_name = update.effective_user.first_name or "Admin"
+
+  original_text = query.message.text
+
+  if action == "confirm_order":
+    updated_card = (
+        f"{original_text}\n\n"
+        f"────────────────────\n"
+        f"✅ *PAYMENT CONFIRMED* by {admin_name} on"
+        f" {datetime.now().strftime('%H:%M')}"
+    )
+    await query.edit_message_text(
+        text=updated_card, parse_mode="Markdown", reply_markup=None
+    )
+
+    # Notify customer directly
+    try:
+      await context.bot.send_message(
+          chat_id=user_id,
+          text=(
+              "🌸 *Piece & Petal — ការទូទាត់ប្រាក់ត្រូវបានផ្ទៀងផ្ទាត់!* 🎉\n\n"
+              "ការទូទាត់ប្រាក់ (Payment) របស់បងទទួលបានជោគជ័យហើយ។\n"
+              "ក្រុមការងារកំពុងរៀបចំវេចខ្ចប់ទំនិញជូនបង"
+              " និងទាក់ទងតាមទូរស័ព្ទមុនពេលដឹកជញ្ជូនណា៎ ✨"
+          ),
+          parse_mode="Markdown",
+      )
+    except Exception as e:
+      logging.error(f"Failed to notify customer {user_id}: {e}")
+
+  elif action == "reject_order":
+    updated_card = (
+        f"{original_text}\n\n"
+        f"────────────────────\n"
+        f"❌ *PAYMENT REJECTED/INVALID* by {admin_name} on"
+        f" {datetime.now().strftime('%H:%M')}"
+    )
+    await query.edit_message_text(
+        text=updated_card, parse_mode="Markdown", reply_markup=None
+    )
+
+    try:
+      await context.bot.send_message(
+          chat_id=user_id,
+          text=(
+              "⚠️ *Piece & Petal — ការទូទាត់ប្រាក់មិនទាន់ត្រឹមត្រូវ*\n\n"
+              "សូមអភ័យទោសបង ក្រុមការងារមិនទាន់អាចផ្ទៀងផ្ទាត់ Slip"
+              " ការផ្ទេរប្រាក់របស់បងបាននៅឡើយទេ។\n"
+              "សូមបងផ្ញើ Screenshot ឬរូបភាព Slip ចូលមកក្នុង Chat"
+              " នេះម្តងទៀតដើម្បីឱ្យក្រុមការងារជួយពិនិត្យជូនណា៎ 🙏"
+          ),
+          parse_mode="Markdown",
+      )
+    except Exception as e:
+      logging.error(f"Failed to notify customer {user_id}: {e}")
+
+
 async def forward_to_admin_topic(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
@@ -226,6 +293,11 @@ async def lifespan(app: FastAPI):
   tg_app.add_handler(CommandHandler("start", start))
   tg_app.add_handler(CommandHandler("broadcast", broadcast))
   tg_app.add_handler(
+      CallbackQueryHandler(
+          handle_order_actions, pattern="^(confirm_order|reject_order):"
+      )
+  )
+  tg_app.add_handler(
       MessageHandler(
           filters.ChatType.PRIVATE & ~filters.COMMAND,
           forward_to_admin_topic,
@@ -241,7 +313,6 @@ async def lifespan(app: FastAPI):
   await tg_app.initialize()
   await tg_app.start()
 
-  # Set Webhook URL so Telegram delivers directly to Render
   webhook_url = f"{RENDER_URL}/telegram-webhook"
   await tg_app.bot.set_webhook(
       url=webhook_url,
@@ -264,7 +335,6 @@ if os.path.exists("templates"):
   api.mount("/static", StaticFiles(directory="templates"), name="static")
 
 
-# Webhook endpoint where Telegram pushes updates directly
 @api.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
   try:
@@ -361,7 +431,7 @@ async def checkout(request: Request):
       except Exception as e:
         logging.error(f"Error creating topic during checkout: {e}")
 
-  # 1. Forward to Google Sheets Orders Tab (15s timeout)
+  # 1. Sync to Google Sheets
   if ORDER_WEBHOOK_URL:
     try:
       order_payload = {
@@ -380,7 +450,20 @@ async def checkout(request: Request):
     except Exception as e:
       logging.error(f"Failed to sync order to Google Sheets: {repr(e)}")
 
-  # 2. Alert Admin Forum
+  # 2. Interactive Admin Buttons
+  keyboard = None
+  if user_id:
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "✅ Confirm Payment", callback_data=f"confirm_order:{user_id}"
+            ),
+            InlineKeyboardButton(
+                "❌ Invalid / Reject", callback_data=f"reject_order:{user_id}"
+            ),
+        ]
+    ])
+
   order_card = (
       f"🛍️ *NEW IN-APP ORDER SUBMITTED*\n"
       f"────────────────────\n"
@@ -391,7 +474,7 @@ async def checkout(request: Request):
       f"• Total: *${total:.2f}*\n\n"
       f"*Items:*\n{order_summary}\n"
       f"────────────────────\n"
-      f"💬 *Action:* Reply directly in this topic to message the customer!"
+      f"💬 Tap below to confirm or reject payment:"
   )
 
   try:
@@ -401,6 +484,7 @@ async def checkout(request: Request):
           message_thread_id=thread_id,
           text=order_card,
           parse_mode="Markdown",
+          reply_markup=keyboard,
       )
       await tg_app.bot.send_message(
           chat_id=user_id,
@@ -418,6 +502,7 @@ async def checkout(request: Request):
           chat_id=ADMIN_GROUP_ID,
           text=order_card,
           parse_mode="Markdown",
+          reply_markup=keyboard,
       )
   except Exception as e:
     logging.error(f"Error sending order alert: {e}")
