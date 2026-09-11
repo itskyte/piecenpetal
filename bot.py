@@ -6,6 +6,7 @@ import logging
 import os
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 import httpx
 import uvicorn
 from telegram import Update
@@ -152,7 +153,6 @@ async def reply_from_admin_topic(
     await update.message.reply_text(f"❌ Failed to deliver: {e}")
 
 
-# Lifespan context to cleanly start & stop bot without ghost instances
 @asynccontextmanager
 async def lifespan(app: FastAPI):
   global tg_app
@@ -174,7 +174,6 @@ async def lifespan(app: FastAPI):
 
   await tg_app.initialize()
   await tg_app.start()
-  # drop_pending_updates prevents backlog race conditions
   await tg_app.updater.start_polling(drop_pending_updates=True)
   logging.info("Telegram Bot successfully polling.")
 
@@ -189,8 +188,11 @@ async def lifespan(app: FastAPI):
 
 api = FastAPI(lifespan=lifespan)
 
+# Mount templates directory so local images can be loaded
+if os.path.exists("templates"):
+  api.mount("/static", StaticFiles(directory="templates"), name="static")
 
-# Responds to both GET and HEAD immediately for Render health checker
+
 @api.api_route("/", methods=["GET", "HEAD"])
 @api.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
