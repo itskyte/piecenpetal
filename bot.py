@@ -31,7 +31,6 @@ CSV_EXPORT_URL = (
     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
 )
 
-# Optional: Paste your Google Apps Script Webhook URL here or in Render Env
 ORDER_WEBHOOK_URL = os.environ.get("ORDER_WEBHOOK_URL", "")
 
 logging.basicConfig(
@@ -132,7 +131,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-  # Admin only command
   if not update.effective_chat or update.effective_chat.id != ADMIN_GROUP_ID:
     return
 
@@ -340,7 +338,7 @@ async def checkout(request: Request):
       except Exception as e:
         logging.error(f"Error creating topic during checkout: {e}")
 
-  # 1. Forward to Google Sheets Orders Tab (if Webhook configured)
+  # 1. Forward to Google Sheets Orders Tab (15s timeout handles cold starts)
   if ORDER_WEBHOOK_URL:
     try:
       order_payload = {
@@ -353,11 +351,11 @@ async def checkout(request: Request):
           "summary": order_summary,
       }
       async with httpx.AsyncClient(
-          timeout=5.0, follow_redirects=True
+          timeout=15.0, follow_redirects=True
       ) as client:
         await client.post(ORDER_WEBHOOK_URL, json=order_payload)
     except Exception as e:
-      logging.error(f"Failed to sync order to Google Sheets: {e}")
+      logging.error(f"Failed to sync order to Google Sheets: {repr(e)}")
 
   # 2. Alert Admin Forum
   order_card = (
