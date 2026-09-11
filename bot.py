@@ -44,7 +44,7 @@ api = FastAPI()
 @api.api_route("/", methods=["GET", "HEAD"])
 @api.api_route("/health", methods=["GET", "HEAD"])
 def health_check():
-  return {"status": "ok", "app": "Piece & Petal Combined Store & Bot"}
+    return {"status": "ok", "app": "Piece & Petal Combined Store & Bot"}
 
 
 @api.get("/shop", response_class=HTMLResponse)
@@ -59,7 +59,8 @@ def serve_shop():
 async def get_products():
     """Fetches and parses live product data directly from Google Sheets CSV export."""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # follow_redirects=True is required for Google Sheets 307 redirects
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
             resp = await client.get(CSV_EXPORT_URL)
             resp.raise_for_status()
 
@@ -68,7 +69,7 @@ async def get_products():
         items = []
 
         for row in reader:
-            # Flexible column matching (strips potential extra whitespace from header keys)
+            # Clean up whitespace and standardize lowercased keys
             clean_row = {
                 (k.strip().lower() if k else ""): (v.strip() if v else "")
                 for k, v in row.items()
