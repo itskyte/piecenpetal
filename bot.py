@@ -7,7 +7,7 @@ import json
 import logging
 import os
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 import httpx
 import uvicorn
@@ -23,6 +23,10 @@ from telegram.ext import (
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", 0))
 PORT = int(os.environ.get("PORT", 8000))
+# Default to your Render domain if RENDER_EXTERNAL_URL is not set
+RENDER_URL = os.environ.get(
+    "RENDER_EXTERNAL_URL", "https://piecenpetal-bot.onrender.com"
+).rstrip("/")
 
 SHEET_ID = os.environ.get(
     "GOOGLE_SHEET_ID", "1oBJ0mo_qWO6fRo6t8YfdOG-_EaUsDwhLP5mISOw-hrE"
@@ -30,7 +34,6 @@ SHEET_ID = os.environ.get(
 CSV_EXPORT_URL = (
     f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
 )
-
 ORDER_WEBHOOK_URL = os.environ.get("ORDER_WEBHOOK_URL", "")
 
 logging.basicConfig(
@@ -70,6 +73,7 @@ def get_all_customers() -> list:
 tg_app = None
 
 
+# Handlers
 async def ensure_user_topic(user, context: ContextTypes.DEFAULT_TYPE) -> int:
   user_id = user.id
   save_customer(user_id)
@@ -236,14 +240,20 @@ async def lifespan(app: FastAPI):
 
   await tg_app.initialize()
   await tg_app.start()
-  await tg_app.updater.start_polling(drop_pending_updates=True)
-  logging.info("Telegram Bot successfully polling.")
+
+  # Set Webhook URL so Telegram delivers directly to Render
+  webhook_url = f"{RENDER_URL}/telegram-webhook"
+  await tg_app.bot.set_webhook(
+      url=webhook_url,
+      drop_pending_updates=True,
+      allowed_updates=Update.ALL_TYPES,
+  )
+  logging.info(f"Telegram Webhook set to: {webhook_url}")
 
   yield
 
-  logging.info("Shutting down bot polling...")
-  if tg_app.updater.running:
-    await tg_app.updater.stop()
+  logging.info("Shutting down bot...")
+  await tg_app.bot.delete_webhook()
   await tg_app.stop()
   await tg_app.shutdown()
 
@@ -252,6 +262,19 @@ api = FastAPI(lifespan=lifespan)
 
 if os.path.exists("templates"):
   api.mount("/static", StaticFiles(directory="templates"), name="static")
+
+
+# Webhook endpoint where Telegram pushes updates directly
+@api.post("/telegram-webhook")
+async def telegram_webhook(request: Request):
+  try:
+    req_data = await request.json()
+    update = Update.de_json(req_data, tg_app.bot)
+    await tg_app.process_update(update)
+    return Response(status_code=200)
+  except Exception as e:
+    logging.error(f"Error processing webhook update: {e}")
+    return Response(status_code=200)
 
 
 @api.api_route("/", methods=["GET", "HEAD"])
@@ -338,7 +361,7 @@ async def checkout(request: Request):
       except Exception as e:
         logging.error(f"Error creating topic during checkout: {e}")
 
-  # 1. Forward to Google Sheets Orders Tab (15s timeout handles cold starts)
+  # 1. Forward to Google Sheets Orders Tab (15s timeout)
   if ORDER_WEBHOOK_URL:
     try:
       order_payload = {
