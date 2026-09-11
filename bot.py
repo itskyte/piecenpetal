@@ -73,7 +73,6 @@ def get_all_customers() -> list:
 tg_app = None
 
 
-# Helpers & Handlers
 async def ensure_user_topic(user, context: ContextTypes.DEFAULT_TYPE) -> int:
   user_id = user.id
   save_customer(user_id)
@@ -167,29 +166,32 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_order_actions(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
-  """Handles one-tap order confirmation or rejection from the admin forum."""
   query = update.callback_query
-  await query.answer()
+  try:
+    await query.answer()
+  except Exception as e:
+    logging.warning(f"Could not answer callback query immediately: {e}")
 
   data = query.data.split(":")
   action = data[0]
   user_id = int(data[1])
   admin_name = update.effective_user.first_name or "Admin"
+  time_str = datetime.now().strftime("%I:%M %p")
 
-  original_text = query.message.text
+  original_text = query.message.text or ""
 
   if action == "confirm_order":
     updated_card = (
         f"{original_text}\n\n"
         f"────────────────────\n"
-        f"✅ *PAYMENT CONFIRMED* by {admin_name} on"
-        f" {datetime.now().strftime('%H:%M')}"
-    )
-    await query.edit_message_text(
-        text=updated_card, parse_mode="Markdown", reply_markup=None
+        f"✅ PAYMENT CONFIRMED by {admin_name} at {time_str}"
     )
 
-    # Notify customer directly
+    try:
+      await query.edit_message_text(text=updated_card, reply_markup=None)
+    except Exception as e:
+      logging.error(f"Error updating admin message text: {e}")
+
     try:
       await context.bot.send_message(
           chat_id=user_id,
@@ -202,18 +204,19 @@ async def handle_order_actions(
           parse_mode="Markdown",
       )
     except Exception as e:
-      logging.error(f"Failed to notify customer {user_id}: {e}")
+      logging.error(f"Failed to send confirmation DM to {user_id}: {e}")
 
   elif action == "reject_order":
     updated_card = (
         f"{original_text}\n\n"
         f"────────────────────\n"
-        f"❌ *PAYMENT REJECTED/INVALID* by {admin_name} on"
-        f" {datetime.now().strftime('%H:%M')}"
+        f"❌ PAYMENT REJECTED by {admin_name} at {time_str}"
     )
-    await query.edit_message_text(
-        text=updated_card, parse_mode="Markdown", reply_markup=None
-    )
+
+    try:
+      await query.edit_message_text(text=updated_card, reply_markup=None)
+    except Exception as e:
+      logging.error(f"Error updating admin message text: {e}")
 
     try:
       await context.bot.send_message(
@@ -228,7 +231,7 @@ async def handle_order_actions(
           parse_mode="Markdown",
       )
     except Exception as e:
-      logging.error(f"Failed to notify customer {user_id}: {e}")
+      logging.error(f"Failed to send rejection DM to {user_id}: {e}")
 
 
 async def forward_to_admin_topic(
@@ -337,14 +340,14 @@ if os.path.exists("templates"):
 
 @api.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
+  """Immediately returns 200 OK and dispatches the update task in the background."""
   try:
     req_data = await request.json()
     update = Update.de_json(req_data, tg_app.bot)
-    await tg_app.process_update(update)
-    return Response(status_code=200)
+    asyncio.create_task(tg_app.process_update(update))
   except Exception as e:
-    logging.error(f"Error processing webhook update: {e}")
-    return Response(status_code=200)
+    logging.error(f"Error scheduling webhook update: {e}")
+  return Response(status_code=200)
 
 
 @api.api_route("/", methods=["GET", "HEAD"])
@@ -431,7 +434,6 @@ async def checkout(request: Request):
       except Exception as e:
         logging.error(f"Error creating topic during checkout: {e}")
 
-  # 1. Sync to Google Sheets
   if ORDER_WEBHOOK_URL:
     try:
       order_payload = {
@@ -450,7 +452,6 @@ async def checkout(request: Request):
     except Exception as e:
       logging.error(f"Failed to sync order to Google Sheets: {repr(e)}")
 
-  # 2. Interactive Admin Buttons
   keyboard = None
   if user_id:
     keyboard = InlineKeyboardMarkup([
