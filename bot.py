@@ -1,8 +1,11 @@
 import asyncio
+import csv
+import io
 import logging
 import os
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
+import httpx
 import uvicorn
 from telegram import Update
 from telegram.ext import (
@@ -17,6 +20,14 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", 0))
 PORT = int(os.environ.get("PORT", 8000))
 
+# Your Google Sheet configuration
+SHEET_ID = os.environ.get(
+    "GOOGLE_SHEET_ID", "1oBJ0mo_qWO6fRo6t8YfdOG-_EaUsDwhLP5mISOw-hrE"
+)
+CSV_EXPORT_URL = (
+    f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
+)
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -28,50 +39,6 @@ thread_to_user = {}
 
 tg_app = None
 api = FastAPI()
-
-# Catalog items
-PRODUCTS = [
-    {
-        "id": "p1",
-        "title": "FANCL Good Choice 20s (30 packs)",
-        "category": "Supplements",
-        "price": 28.00,
-        "image": "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=500&q=80",
-        "tag": "Daily Vitality",
-    },
-    {
-        "id": "p2",
-        "title": "FANCL Good Choice 30s (30 packs)",
-        "category": "Supplements",
-        "price": 34.00,
-        "image": "https://images.unsplash.com/photo-1584308666744-24d5c474f2ae?w=500&q=80",
-        "tag": "Anti-Aging & Collagen",
-    },
-    {
-        "id": "p3",
-        "title": "DHC Collagen (60 Days)",
-        "category": "Supplements",
-        "price": 15.00,
-        "image": "https://images.unsplash.com/photo-1550572017-ed200f5e6343?w=500&q=80",
-        "tag": "Firmness & Glow",
-    },
-    {
-        "id": "p4",
-        "title": "Quality 1st Derma Laser Super VC100",
-        "category": "Skincare",
-        "price": 12.50,
-        "image": "https://images.unsplash.com/photo-1570172619644-dfd03ed5d881?w=500&q=80",
-        "tag": "Pore Tightening",
-    },
-    {
-        "id": "p5",
-        "title": "Keana Nadeshiko Rice Mask (10 pcs)",
-        "category": "Skincare",
-        "price": 14.00,
-        "image": "https://images.unsplash.com/photo-1608248597359-bb51da9c9689?w=500&q=80",
-        "tag": "Hydration",
-    },
-]
 
 
 @api.get("/")
@@ -89,8 +56,51 @@ def serve_shop():
 
 
 @api.get("/api/products")
-def get_products():
-    return PRODUCTS
+async def get_products():
+    """Fetches and parses live product data directly from Google Sheets CSV export."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(CSV_EXPORT_URL)
+            resp.raise_for_status()
+
+        f = io.StringIO(resp.text)
+        reader = csv.DictReader(f)
+        items = []
+
+        for row in reader:
+            # Flexible column matching (strips potential extra whitespace from header keys)
+            clean_row = {
+                (k.strip().lower() if k else ""): (v.strip() if v else "")
+                for k, v in row.items()
+            }
+
+            prod_id = clean_row.get("id")
+            title = clean_row.get("title")
+
+            if not prod_id or not title:
+                continue
+
+            raw_price = clean_row.get("price", "0")
+            try:
+                price_val = float(str(raw_price).replace("$", "").strip())
+            except ValueError:
+                price_val = 0.0
+
+            items.append(
+                {
+                    "id": prod_id,
+                    "title": title,
+                    "category": clean_row.get("category", "General"),
+                    "price": price_val,
+                    "image": clean_row.get("image", ""),
+                    "tag": clean_row.get("tag", ""),
+                }
+            )
+
+        return items
+    except Exception as e:
+        logging.error(f"Failed to fetch live products from Google Sheets: {e}")
+        return []
 
 
 @api.post("/api/checkout")
@@ -106,7 +116,7 @@ async def checkout(request: Request):
     user_id = int(raw_user_id) if raw_user_id else None
     thread_id = None
 
-    # Auto-create or find existing topic
+    # Auto-create or fetch existing customer topic
     if user_id:
         if user_id in user_to_thread:
             thread_id = user_to_thread[user_id]
@@ -143,7 +153,7 @@ async def checkout(request: Request):
                 text=order_card,
                 parse_mode="Markdown",
             )
-            # Send immediate receipt confirmation into the customer's private chat
+            # Send immediate receipt confirmation into customer's private chat
             await tg_app.bot.send_message(
                 chat_id=user_id,
                 text=(
@@ -155,7 +165,6 @@ async def checkout(request: Request):
                 parse_mode="Markdown",
             )
         else:
-            # Fallback if accessed purely from an external browser without Telegram WebApp context
             await tg_app.bot.send_message(
                 chat_id=ADMIN_GROUP_ID,
                 text=order_card,
@@ -248,13 +257,11 @@ async def reply_from_admin_topic(update: Update, context: ContextTypes.DEFAULT_T
     if not update.message:
         return
 
-    # Ignore messages sent by the bot itself
+    # Ignore messages sent by bots
     if update.effective_user and update.effective_user.is_bot:
         return
 
     thread_id = update.message.message_thread_id
-
-    # If it's sent in the General thread (None), ignore
     if not thread_id:
         return
 
@@ -263,8 +270,8 @@ async def reply_from_admin_topic(update: Update, context: ContextTypes.DEFAULT_T
     if not customer_id:
         logging.warning(f"No mapping found for message_thread_id: {thread_id}")
         await update.message.reply_text(
-            "⚠️ *Warning:* Mapping not found for this topic (likely due to a server redeploy/restart).\n"
-            "Ask the customer to send any text in the bot chat to re-link.",
+            "⚠️ *Warning:* Mapping not found for this topic (likely due to a server restart).\n"
+            "Ask the customer to send any message in the bot to re-sync.",
             parse_mode="Markdown",
         )
         return
