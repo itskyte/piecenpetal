@@ -324,13 +324,29 @@
       document.getElementById('detail-modal').classList.add('hidden');
     }
 
-    function askAboutProduct() {
+    async function askAboutProduct() {
       if (!selectedProduct) return;
+      
+      const userId = tg?.initDataUnsafe?.user?.id;
+      const userName = tg?.initDataUnsafe?.user?.first_name || 'Customer';
+    
+      try {
+        await fetch('/api/inquire', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: userId,
+            customer_name: userName,
+            product_title: selectedProduct.title
+          })
+        });
+      } catch (err) {
+        console.error(err);
+      }
+    
+      // Close the mini app so the customer lands back in the chat with the prompt
       if (tg) {
-        tg.sendData(JSON.stringify({ action: "inquire", item: selectedProduct.title }));
         tg.close();
-      } else {
-        alert(`Inquire in chat: "Hi Piece & Petal, I want to ask about ${selectedProduct.title}"`);
       }
     }
 
