@@ -6,7 +6,7 @@
   <title>Piece & Petal — Tokyo Drops</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     body { font-family: 'Plus Jakarta Sans', sans-serif; }
     .hide-scrollbar::-webkit-scrollbar { display: none; }
@@ -26,19 +26,97 @@
     </span>
   </header>
 
-  <!-- Categories Bar -->
-  <div class="sticky top-[69px] z-20 bg-[#FAF8F5]/90 backdrop-blur-md px-5 py-3 border-b border-stone-100">
+  <!-- Filter Pills Bar -->
+  <div class="sticky top-[69px] z-20 bg-[#FAF8F5]/90 backdrop-blur-md px-5 py-3 border-b border-stone-100 flex flex-col space-y-2">
     <div id="category-bar" class="flex space-x-2 overflow-x-auto hide-scrollbar"></div>
   </div>
 
   <!-- Product Grid -->
   <main class="p-5">
     <div id="product-grid" class="grid grid-cols-2 gap-4">
-      <div class="col-span-2 text-center py-12 text-xs text-stone-400">Loading catalog...</div>
+      <div class="col-span-2 text-center py-16 text-xs text-stone-400">Loading catalog...</div>
     </div>
   </main>
 
-  <!-- Sticky Bottom Cart Bar -->
+  <!-- Product Detail Drawer -->
+  <div id="detail-modal" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm hidden flex items-end">
+    <div class="bg-white w-full rounded-t-3xl max-h-[92vh] overflow-y-auto p-6 space-y-5 hide-scrollbar">
+      <div class="flex justify-between items-center pb-2 border-b border-stone-100">
+        <span id="p-brand-badge" class="px-2.5 py-1 rounded-full text-xs font-bold bg-stone-100 text-stone-700"></span>
+        <button onclick="closeDetail()" class="text-stone-400 hover:text-stone-700 text-sm font-semibold p-1">✕</button>
+      </div>
+
+      <!-- Hero Photo -->
+      <div class="aspect-square w-full bg-[#FAF8F5] rounded-2xl overflow-hidden border border-stone-100">
+        <img id="p-detail-img" src="" alt="Product" class="w-full h-full object-contain">
+      </div>
+
+      <!-- Title & Price -->
+      <div>
+        <h2 id="p-detail-title" class="text-lg font-bold text-stone-900 leading-snug"></h2>
+        <p id="p-detail-price" class="text-2xl font-extrabold text-stone-900 mt-1"></p>
+      </div>
+
+      <!-- Trust & Delivery Pills -->
+      <div class="grid grid-cols-2 gap-2 text-[11px] font-semibold text-stone-600">
+        <div class="bg-stone-50 border border-stone-200/70 p-2.5 rounded-xl flex items-center space-x-2">
+          <span>🚚</span>
+          <span>Phnom Penh 1–2 days</span>
+        </div>
+        <div class="bg-stone-50 border border-stone-200/70 p-2.5 rounded-xl flex items-center space-x-2">
+          <span>📦</span>
+          <span>Provinces via VET</span>
+        </div>
+        <div class="bg-stone-50 border border-stone-200/70 p-2.5 rounded-xl flex items-center space-x-2">
+          <span>✓</span>
+          <span>100% Tokyo Authentic</span>
+        </div>
+        <div class="bg-stone-50 border border-stone-200/70 p-2.5 rounded-xl flex items-center space-x-2">
+          <span>💳</span>
+          <span>ABA / KHQR Payment</span>
+        </div>
+      </div>
+
+      <!-- Actions -->
+      <div class="space-y-2 pt-2">
+        <div class="grid grid-cols-2 gap-3">
+          <button id="p-add-cart-btn" class="w-full py-3.5 bg-stone-900 text-white rounded-xl text-xs font-bold active:scale-[0.98] transition">
+            Add to Cart
+          </button>
+          <button id="p-buy-now-btn" class="w-full py-3.5 bg-amber-400 hover:bg-amber-500 text-stone-900 rounded-xl text-xs font-bold active:scale-[0.98] transition">
+            Place Order Now
+          </button>
+        </div>
+        <button onclick="askAboutProduct()" class="w-full py-3 text-xs font-semibold text-stone-600 hover:text-stone-900 flex items-center justify-center space-x-1">
+          <span>💬</span>
+          <span>Ask about this product</span>
+        </button>
+      </div>
+
+      <!-- Short Description -->
+      <div class="space-y-2 border-t border-stone-100 pt-4">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-stone-400">Description</h3>
+        <p id="p-detail-desc" class="text-xs text-stone-600 leading-relaxed"></p>
+      </div>
+
+      <!-- Specifications -->
+      <div class="space-y-2 border-t border-stone-100 pt-4">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-stone-400">Specifications</h3>
+        <div class="grid grid-cols-2 gap-y-2 text-xs py-2">
+          <span class="text-stone-400">Brand</span>
+          <span id="spec-brand" class="font-medium text-stone-800"></span>
+          <span class="text-stone-400">Category</span>
+          <span id="spec-category" class="font-medium text-stone-800"></span>
+          <span class="text-stone-400">Size / Volume</span>
+          <span id="spec-size" class="font-medium text-stone-800"></span>
+          <span class="text-stone-400">Availability</span>
+          <span id="spec-avail" class="font-medium text-stone-800"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Cart Sticky Bar -->
   <div id="cart-bar" class="fixed bottom-4 inset-x-4 max-w-md mx-auto hidden z-40">
     <button onclick="openCheckout()" class="w-full bg-stone-900 text-white p-4 rounded-2xl shadow-xl flex items-center justify-between font-medium active:scale-[0.98] transition">
       <div class="flex items-center space-x-2">
@@ -50,40 +128,36 @@
   </div>
 
   <!-- Checkout Drawer -->
-  <div id="checkout-modal" class="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm hidden flex items-end">
-    <div class="bg-white w-full rounded-t-3xl max-h-[90vh] overflow-y-auto p-6 space-y-5">
-      
-      <!-- Modal Header -->
+  <div id="checkout-modal" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm hidden flex items-end">
+    <div class="bg-white w-full rounded-t-3xl max-h-[90vh] overflow-y-auto p-6 space-y-5 hide-scrollbar">
       <div class="flex justify-between items-center pb-2 border-b border-stone-100">
         <div>
           <h2 class="text-base font-semibold text-stone-900">Checkout Summary</h2>
           <p class="text-[11px] text-stone-400">Review your drop selections</p>
         </div>
-        <button onclick="closeCheckout()" class="text-stone-400 hover:text-stone-600 text-sm font-medium">Close</button>
+        <button onclick="closeCheckout()" class="text-stone-400 hover:text-stone-700 text-sm font-medium">Close</button>
       </div>
 
-      <!-- Itemized Cart with Quantity Controls -->
       <div id="order-items-list" class="divide-y divide-stone-100 text-sm"></div>
 
-      <!-- Customer Details Form -->
       <div class="space-y-3 pt-2">
         <div>
           <label class="text-[11px] font-semibold text-stone-500 uppercase">Your Name</label>
-          <input type="text" id="cust-name" placeholder="Name" class="w-full mt-1 p-3 border border-stone-200 rounded-xl text-sm outline-none focus:border-stone-800 transition">
+          <input type="text" id="cust-name" placeholder="Name" class="w-full mt-1 p-3 border border-stone-200 rounded-xl text-sm outline-none focus:border-stone-800">
         </div>
         <div>
           <label class="text-[11px] font-semibold text-stone-500 uppercase">Phone Number <span class="text-rose-500">*</span></label>
-          <input type="tel" id="cust-phone" placeholder="012 345 678" class="w-full mt-1 p-3 border border-stone-200 rounded-xl text-sm outline-none focus:border-stone-800 transition">
+          <input type="tel" id="cust-phone" placeholder="012 345 678" class="w-full mt-1 p-3 border border-stone-200 rounded-xl text-sm outline-none focus:border-stone-800">
         </div>
         <div>
           <label class="text-[11px] font-semibold text-stone-500 uppercase">Delivery Location <span class="text-rose-500">*</span></label>
-          <input type="text" id="cust-address" placeholder="Phnom Penh address / Province" class="w-full mt-1 p-3 border border-stone-200 rounded-xl text-sm outline-none focus:border-stone-800 transition">
+          <input type="text" id="cust-address" placeholder="Phnom Penh address / Province" class="w-full mt-1 p-3 border border-stone-200 rounded-xl text-sm outline-none focus:border-stone-800">
         </div>
       </div>
 
       <!-- KHQR Section -->
       <div class="p-4 bg-stone-50 rounded-2xl border border-stone-200/80 text-center space-y-2">
-        <p class="text-xs font-semibold uppercase tracking-wider text-stone-500">Scan via ABA / Any Banking App</p>
+        <p class="text-xs font-semibold uppercase tracking-wider text-stone-500">Scan via ABA / KHQR App</p>
         <div class="w-48 h-48 mx-auto bg-white p-2 rounded-xl shadow-sm border border-stone-200 flex items-center justify-center overflow-hidden">
           <img src="/static/khqr.png" alt="Piece & Petal KHQR" class="w-full h-full object-contain" onerror="this.parentElement.innerHTML='<span class=\'text-xs text-stone-400\'>Add khqr.png to templates/</span>'">
         </div>
@@ -98,16 +172,12 @@
 
   <!-- Success Confirmation Screen -->
   <div id="success-screen" class="fixed inset-0 z-50 bg-[#FAF8F5] hidden flex flex-col items-center justify-center p-6 text-center">
-    <div class="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mb-4 text-2xl font-bold">
-      ✓
-    </div>
+    <div class="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mb-4 text-2xl font-bold">✓</div>
     <h2 class="text-xl font-bold text-stone-900">Order Successfully Placed!</h2>
     <p class="text-sm text-stone-500 mt-2 max-w-xs leading-relaxed">
       អរគុណបង! ក្រុមការងារបានទទួលការកម្ម៉ង់ហើយ។ យើងខ្ញុំកំពុងផ្ទៀងផ្ទាត់ការទូទាត់ប្រាក់ និងឆ្លើយតបបញ្ជាក់ជូនក្នុង Chat ភ្លាមៗ។
     </p>
-    <button onclick="dismissSuccess()" class="mt-8 px-8 py-3 bg-stone-900 text-white rounded-xl text-sm font-semibold">
-      Continue Browsing
-    </button>
+    <button onclick="dismissSuccess()" class="mt-8 px-8 py-3 bg-stone-900 text-white rounded-xl text-sm font-semibold">Continue Browsing</button>
   </div>
 
   <script>
@@ -118,8 +188,9 @@
     }
 
     let allProducts = [];
-    let activeCategory = 'All';
+    let activeFilter = 'All';
     let cart = {};
+    let selectedProduct = null;
 
     async function fetchCatalog() {
       try {
@@ -128,9 +199,8 @@
         renderCategories();
         renderProducts();
       } catch (err) {
-        console.error('Failed to load products', err);
         document.getElementById('product-grid').innerHTML = `
-          <div class="col-span-2 text-center py-12 text-xs text-rose-500">Failed to load items. Pull down to refresh.</div>
+          <div class="col-span-2 text-center py-16 text-xs text-rose-500">Catalog sync failed. Pull down to refresh.</div>
         `;
       }
     }
@@ -140,13 +210,11 @@
       const catBar = document.getElementById('category-bar');
 
       catBar.innerHTML = categories.map(cat => {
-        const isActive = cat === activeCategory;
-        const classes = isActive
-          ? 'bg-stone-900 text-white border-stone-900'
-          : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50';
-
+        const isActive = cat === activeFilter;
         return `
-          <button onclick="setCategory('${cat}')" class="whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-medium border transition ${classes}">
+          <button onclick="setCategory('${cat}')" class="whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-semibold border transition ${
+            isActive ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
+          }">
             ${cat}
           </button>
         `;
@@ -154,28 +222,28 @@
     }
 
     function setCategory(cat) {
-      activeCategory = cat;
+      activeFilter = cat;
       renderCategories();
       renderProducts();
     }
 
     function renderProducts() {
-      const filtered = activeCategory === 'All' 
+      const filtered = activeFilter === 'All' 
         ? allProducts 
-        : allProducts.filter(p => p.category.toLowerCase() === activeCategory.toLowerCase());
+        : allProducts.filter(p => p.category.toLowerCase() === activeFilter.toLowerCase());
 
       const grid = document.getElementById('product-grid');
 
       if (filtered.length === 0) {
-        grid.innerHTML = `<div class="col-span-2 text-center py-12 text-xs text-stone-400">No items under this category yet.</div>`;
+        grid.innerHTML = `<div class="col-span-2 text-center py-16 text-xs text-stone-400">No items available in this category.</div>`;
         return;
       }
 
       grid.innerHTML = filtered.map(p => {
-        const isSoldOut = p.tag?.toLowerCase().includes('sold') || Number(p.price) === 0;
+        const isSoldOut = p.availability?.toLowerCase().includes('sold') || Number(p.price) === 0;
 
         return `
-          <div class="bg-white rounded-2xl border border-stone-200/70 overflow-hidden flex flex-col justify-between shadow-sm">
+          <div onclick="openDetail('${p.id}')" class="bg-white rounded-2xl border border-stone-200/70 overflow-hidden flex flex-col justify-between shadow-sm cursor-pointer active:scale-[0.99] transition">
             <div class="aspect-square w-full bg-stone-50 relative overflow-hidden">
               <img src="${p.image}" alt="${p.title}" class="w-full h-full object-cover ${isSoldOut ? 'opacity-40 grayscale' : ''}" onerror="this.src='https://placehold.co/400x400/faf8f5/stone?text=Piece+%26+Petal'">
               ${p.tag ? `
@@ -183,35 +251,94 @@
                   ${p.tag}
                 </span>
               ` : ''}
+              <span class="absolute bottom-2 right-2 text-[10px] font-medium bg-black/40 text-white backdrop-blur-md px-1.5 py-0.5 rounded">
+                ${p.brand}
+              </span>
             </div>
             <div class="p-3.5 space-y-2 flex-1 flex flex-col justify-between">
               <div>
                 <p class="text-xs font-semibold text-stone-900 leading-snug line-clamp-2">${p.title}</p>
                 <p class="text-xs font-bold text-stone-900 mt-1">$${Number(p.price).toFixed(2)}</p>
               </div>
-              ${isSoldOut ? `
-                <button disabled class="w-full py-2 bg-stone-100 rounded-lg text-xs font-semibold text-stone-400 cursor-not-allowed">
-                  Sold Out
-                </button>
-              ` : `
-                <button onclick="changeQty('${p.id}', 1)" class="w-full py-2 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-lg text-xs font-medium text-stone-800 active:scale-[0.97] transition">
-                  + Add to Bag
-                </button>
-              `}
+              <button onclick="event.stopPropagation(); ${isSoldOut ? '' : `changeQty('${p.id}', 1)`}" ${isSoldOut ? 'disabled' : ''} class="w-full py-2 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-lg text-xs font-medium text-stone-800 active:scale-[0.97] transition ${isSoldOut ? 'cursor-not-allowed opacity-40' : ''}">
+                ${isSoldOut ? 'Sold Out' : '+ Add to Bag'}
+              </button>
             </div>
           </div>
         `;
       }).join('');
     }
 
-    function changeQty(id, delta) {
-      const current = cart[id] || 0;
-      const next = current + delta;
-      if (next <= 0) {
-        delete cart[id];
+    function openDetail(id) {
+      selectedProduct = allProducts.find(p => p.id === id);
+      if (!selectedProduct) return;
+
+      const isSoldOut = selectedProduct.availability?.toLowerCase().includes('sold');
+
+      document.getElementById('p-brand-badge').innerText = selectedProduct.brand || 'Tokyo Import';
+      document.getElementById('p-detail-img').src = selectedProduct.image;
+      document.getElementById('p-detail-title').innerText = selectedProduct.title;
+      document.getElementById('p-detail-price').innerText = `$${Number(selectedProduct.price).toFixed(2)}`;
+      document.getElementById('p-detail-desc').innerText = selectedProduct.description || 'Curated Japanese item.';
+
+      document.getElementById('spec-brand').innerText = selectedProduct.brand || '-';
+      document.getElementById('spec-category').innerText = selectedProduct.category || '-';
+      document.getElementById('spec-size').innerText = selectedProduct.size || '-';
+      document.getElementById('spec-avail').innerText = selectedProduct.availability || 'In Stock';
+
+      const addBtn = document.getElementById('p-add-cart-btn');
+      const buyBtn = document.getElementById('p-buy-now-btn');
+
+      if (isSoldOut) {
+        addBtn.disabled = true;
+        buyBtn.disabled = true;
+        addBtn.innerText = 'Sold Out';
+        buyBtn.innerText = 'Sold Out';
+        addBtn.className = 'w-full py-3.5 bg-stone-200 text-stone-400 rounded-xl text-xs font-bold cursor-not-allowed';
+        buyBtn.className = 'w-full py-3.5 bg-stone-200 text-stone-400 rounded-xl text-xs font-bold cursor-not-allowed';
       } else {
-        cart[id] = next;
+        addBtn.disabled = false;
+        buyBtn.disabled = false;
+        addBtn.innerText = 'Add to Cart';
+        buyBtn.innerText = 'Place Order Now';
+        addBtn.className = 'w-full py-3.5 bg-stone-900 text-white rounded-xl text-xs font-bold active:scale-[0.98] transition';
+        buyBtn.className = 'w-full py-3.5 bg-amber-400 text-stone-900 rounded-xl text-xs font-bold active:scale-[0.98] transition';
+
+        addBtn.onclick = () => {
+          changeQty(selectedProduct.id, 1);
+          closeDetail();
+        };
+
+        buyBtn.onclick = () => {
+          cart = { [selectedProduct.id]: 1 };
+          updateCartBar();
+          closeDetail();
+          openCheckout();
+        };
       }
+
+      document.getElementById('detail-modal').classList.remove('hidden');
+    }
+
+    function closeDetail() {
+      document.getElementById('detail-modal').classList.add('hidden');
+    }
+
+    function askAboutProduct() {
+      if (!selectedProduct) return;
+      if (tg) {
+        tg.sendData(JSON.stringify({ action: "inquire", item: selectedProduct.title }));
+        tg.close();
+      } else {
+        alert(`Inquire in chat: "Hi Piece & Petal, I want to ask about ${selectedProduct.title}"`);
+      }
+    }
+
+    function changeQty(id, delta) {
+      const next = (cart[id] || 0) + delta;
+      if (next <= 0) delete cart[id];
+      else cart[id] = next;
+
       updateCartBar();
       if (!document.getElementById('checkout-modal').classList.contains('hidden')) {
         renderOrderItems();
@@ -272,7 +399,6 @@
           <span>$${total.toFixed(2)}</span>
         </div>
       `;
-
       list.innerHTML = html;
     }
 
@@ -290,23 +416,22 @@
       const phone = document.getElementById('cust-phone').value.trim();
       const address = document.getElementById('cust-address').value.trim();
 
-      // Field validation
       let hasError = false;
       const phoneInput = document.getElementById('cust-phone');
       const addressInput = document.getElementById('cust-address');
 
       if (!phone) {
-        phoneInput.classList.add('border-rose-500', 'bg-rose-50/20');
+        phoneInput.classList.add('border-rose-500', 'bg-rose-50/30');
         hasError = true;
       } else {
-        phoneInput.classList.remove('border-rose-500', 'bg-rose-50/20');
+        phoneInput.classList.remove('border-rose-500', 'bg-rose-50/30');
       }
 
       if (!address) {
-        addressInput.classList.add('border-rose-500', 'bg-rose-50/20');
+        addressInput.classList.add('border-rose-500', 'bg-rose-50/30');
         hasError = true;
       } else {
-        addressInput.classList.remove('border-rose-500', 'bg-rose-50/20');
+        addressInput.classList.remove('border-rose-500', 'bg-rose-50/30');
       }
 
       if (hasError) return;
@@ -347,10 +472,10 @@
           updateCartBar();
           document.getElementById('success-screen').classList.remove('hidden');
         } else {
-          alert('Failed to submit order. Please message us directly.');
+          alert('Failed to submit order. Please message us directly in chat.');
         }
       } catch (e) {
-        alert('Network error. Please try again or chat with us.');
+        alert('Network connection error. Please try again.');
       } finally {
         submitBtn.disabled = false;
         submitBtn.innerText = 'I Have Transferred • Place Order';
