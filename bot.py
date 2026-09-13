@@ -140,7 +140,7 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
   msg_text = " ".join(context.args)
   if not msg_text:
     await update.message.reply_text(
-        "Usage: `/broadcast Hello everyone! Drop 02 is now live!`",
+        "Usage: `/broadcast Hello everyone! Tokyo Drop is live!`",
         parse_mode="Markdown",
     )
     return
@@ -167,10 +167,14 @@ async def handle_order_actions(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ):
   query = update.callback_query
+  if not query:
+    return
+
+  # Acknowledge immediately to avoid Telegram client hang
   try:
     await query.answer()
   except Exception as e:
-    logging.warning(f"Could not answer callback query immediately: {e}")
+    logging.warning(f"Failed to answer query: {e}")
 
   data = query.data.split(":")
   action = data[0]
@@ -178,57 +182,68 @@ async def handle_order_actions(
   admin_name = update.effective_user.first_name or "Admin"
   time_str = datetime.now().strftime("%I:%M %p")
 
-  original_text = query.message.text or ""
+  msg = query.message
+  base_text = msg.text or msg.caption or "Order Details"
+  if "💬 Tap below" in base_text:
+    base_text = base_text.split("💬 Tap below")[0].strip()
 
   if action == "confirm_order":
     updated_card = (
-        f"{original_text}\n\n"
+        f"{base_text}\n\n"
         f"────────────────────\n"
         f"✅ PAYMENT CONFIRMED by {admin_name} at {time_str}"
     )
 
     try:
-      await query.edit_message_text(text=updated_card, reply_markup=None)
+      await context.bot.edit_message_text(
+          chat_id=msg.chat_id,
+          message_id=msg.message_id,
+          text=updated_card,
+          reply_markup=None,
+      )
     except Exception as e:
-      logging.error(f"Error updating admin message text: {e}")
+      logging.error(f"Failed to edit admin card: {e}")
 
     try:
       await context.bot.send_message(
           chat_id=user_id,
           text=(
-              "🌸 *Piece & Petal — ការទូទាត់ប្រាក់ត្រូវបានផ្ទៀងផ្ទាត់!* 🎉\n\n"
+              "🌸 Piece & Petal — ការទូទាត់ប្រាក់ត្រូវបានផ្ទៀងផ្ទាត់! 🎉\n\n"
               "ការទូទាត់ប្រាក់ (Payment) របស់បងទទួលបានជោគជ័យហើយ។\n"
               "ក្រុមការងារកំពុងរៀបចំវេចខ្ចប់ទំនិញជូនបង"
               " និងទាក់ទងតាមទូរស័ព្ទមុនពេលដឹកជញ្ជូនណា៎ ✨"
           ),
-          parse_mode="Markdown",
       )
     except Exception as e:
       logging.error(f"Failed to send confirmation DM to {user_id}: {e}")
 
   elif action == "reject_order":
     updated_card = (
-        f"{original_text}\n\n"
+        f"{base_text}\n\n"
         f"────────────────────\n"
         f"❌ PAYMENT REJECTED by {admin_name} at {time_str}"
     )
 
     try:
-      await query.edit_message_text(text=updated_card, reply_markup=None)
+      await context.bot.edit_message_text(
+          chat_id=msg.chat_id,
+          message_id=msg.message_id,
+          text=updated_card,
+          reply_markup=None,
+      )
     except Exception as e:
-      logging.error(f"Error updating admin message text: {e}")
+      logging.error(f"Failed to edit admin card: {e}")
 
     try:
       await context.bot.send_message(
           chat_id=user_id,
           text=(
-              "⚠️ *Piece & Petal — ការទូទាត់ប្រាក់មិនទាន់ត្រឹមត្រូវ*\n\n"
+              "⚠️ Piece & Petal — ការទូទាត់ប្រាក់មិនទាន់ត្រឹមត្រូវ\n\n"
               "សូមអភ័យទោសបង ក្រុមការងារមិនទាន់អាចផ្ទៀងផ្ទាត់ Slip"
               " ការផ្ទេរប្រាក់របស់បងបាននៅឡើយទេ។\n"
-              "សូមបងផ្ញើ Screenshot ឬរូបភាព Slip ចូលមកក្នុង Chat"
-              " នេះម្តងទៀតដើម្បីឱ្យក្រុមការងារជួយពិនិត្យជូនណា៎ 🙏"
+              "សូមបងផ្ញើរូបភាព Slip ចូលមកក្នុង Chat នេះម្តងទៀត"
+              " ដើម្បីឱ្យក្រុមការងារជួយពិនិត្យជូនណា៎ 🙏"
           ),
-          parse_mode="Markdown",
       )
     except Exception as e:
       logging.error(f"Failed to send rejection DM to {user_id}: {e}")
@@ -271,8 +286,7 @@ async def reply_from_admin_topic(
   customer_id = thread_to_user.get(thread_id)
   if not customer_id:
     await update.message.reply_text(
-        "⚠️ *Warning:* Mapping lost after server restart. Ask customer to send"
-        " a message in bot.",
+        "⚠️ Mapping lost after restart. Ask customer to send a message.",
         parse_mode="Markdown",
     )
     return
@@ -284,8 +298,8 @@ async def reply_from_admin_topic(
         message_id=update.message.message_id,
     )
   except Exception as e:
-    logging.error(f"Failed to copy to customer {customer_id}: {e}")
-    await update.message.reply_text(f"❌ Failed to deliver: {e}")
+    logging.error(f"Failed to copy message: {e}")
+    await update.message.reply_text(f"❌ Delivery failed: {e}")
 
 
 @asynccontextmanager
@@ -322,11 +336,11 @@ async def lifespan(app: FastAPI):
       drop_pending_updates=True,
       allowed_updates=Update.ALL_TYPES,
   )
-  logging.info(f"Telegram Webhook set to: {webhook_url}")
+  logging.info(f"Telegram Webhook active at: {webhook_url}")
 
   yield
 
-  logging.info("Shutting down bot...")
+  logging.info("Shutting down...")
   await tg_app.bot.delete_webhook()
   await tg_app.stop()
   await tg_app.shutdown()
@@ -340,13 +354,12 @@ if os.path.exists("templates"):
 
 @api.post("/telegram-webhook")
 async def telegram_webhook(request: Request):
-  """Immediately returns 200 OK and dispatches the update task in the background."""
   try:
     req_data = await request.json()
     update = Update.de_json(req_data, tg_app.bot)
     asyncio.create_task(tg_app.process_update(update))
   except Exception as e:
-    logging.error(f"Error scheduling webhook update: {e}")
+    logging.error(f"Error handling webhook: {e}")
   return Response(status_code=200)
 
 
@@ -394,14 +407,20 @@ async def get_products():
       items.append({
           "id": prod_id,
           "title": title,
+          "brand": clean_row.get("brand", "Tokyo Sourcing"),
           "category": clean_row.get("category", "General"),
           "price": price_val,
+          "availability": clean_row.get("availability", "In Stock"),
+          "size": clean_row.get("size", "-"),
           "image": clean_row.get("image", ""),
           "tag": clean_row.get("tag", ""),
+          "description": clean_row.get(
+              "description", "Authentic Japanese product curated directly from Tokyo."
+          ),
       })
     return items
   except Exception as e:
-    logging.error(f"Failed to fetch live products from Google Sheets: {e}")
+    logging.error(f"Failed to fetch products: {e}")
     return []
 
 
@@ -432,7 +451,7 @@ async def checkout(request: Request):
         user_to_thread[user_id] = thread_id
         thread_to_user[thread_id] = user_id
       except Exception as e:
-        logging.error(f"Error creating topic during checkout: {e}")
+        logging.error(f"Error creating topic: {e}")
 
   if ORDER_WEBHOOK_URL:
     try:
@@ -450,7 +469,7 @@ async def checkout(request: Request):
       ) as client:
         await client.post(ORDER_WEBHOOK_URL, json=order_payload)
     except Exception as e:
-      logging.error(f"Failed to sync order to Google Sheets: {repr(e)}")
+      logging.error(f"Google Sheet logging error: {repr(e)}")
 
   keyboard = None
   if user_id:
