@@ -39,8 +39,6 @@ logging.basicConfig(
 CUSTOMER_DB_FILE = "customers.json"
 THREADS_DB_FILE = "threads.json"
 
-# --- Persistent Storage Helpers ---
-
 def load_threads():
     if os.path.exists(THREADS_DB_FILE):
         try:
@@ -80,17 +78,13 @@ def save_customer(user_id: int):
 
 tg_app = None
 
-# --- Telegram Handlers ---
-
 async def ensure_user_topic(user, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = user.id
     save_customer(user_id)
 
-    # 1. Return existing thread if already mapped
     if user_id in user_to_thread:
         return user_to_thread[user_id]
 
-    # 2. Otherwise, create a new forum topic in the admin group
     topic_name = f"🌸 {user.full_name[:18]} ({user_id})"
     try:
         topic = await context.bot.create_forum_topic(
@@ -98,8 +92,6 @@ async def ensure_user_topic(user, context: ContextTypes.DEFAULT_TYPE) -> int:
             name=topic_name
         )
         thread_id = topic.message_thread_id
-        
-        # Save mapping both in memory and to disk
         user_to_thread[user_id] = thread_id
         thread_to_user[thread_id] = user_id
         save_threads()
@@ -119,34 +111,41 @@ async def ensure_user_topic(user, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return thread_id
     except Exception as e:
-        logging.error(f"Error creating forum topic for user {user_id}: {e}")
+        logging.error(f"FATAL: Cannot create topic in chat {ADMIN_GROUP_ID}. Reason: {e}")
         return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    logging.info(f"-> /start received from user {update.effective_user.id}")
+    
     if not update.effective_chat or update.effective_chat.type != "private":
         return
-    if not update.message:
-        return
 
+    # 1. ALWAYS send client welcome message first so client is never left hanging
     welcome_text = (
         "🌸 *Welcome to Piece & Petal* 🇯🇵✨\n\n"
         "Piece & Petal មានលក់ Supplement, Skincare, Cosmetics, និងផលិតផលផ្សេងៗនាំចូលពីជប៉ុន\n\n"
         "ឥវ៉ាន់ធានាសុទ្ធពីជប៉ុន 100% អ្នកលក់ទៅយកផ្ទាល់ពីហាង\n\n"
         "បងៗចង់ស្វែងរក ឬចង់ទិញផលិតផលអ្វី អាចទម្លាក់សារមក ក្រុមការងារនឹងឆ្លើយតបជូនភ្លាមៗណា៎ 😍"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    try:
+        await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    except Exception as e:
+        logging.error(f"Failed to send welcome message: {e}")
 
+    # 2. Link or create forum topic in admin group
     thread_id = await ensure_user_topic(update.effective_user, context)
     if thread_id:
-        await context.bot.send_message(
-            chat_id=ADMIN_GROUP_ID,
-            message_thread_id=thread_id,
-            text="⚡ *Customer tapped /start*",
-            parse_mode="Markdown"
-        )
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_GROUP_ID,
+                message_thread_id=thread_id,
+                text="⚡ *Customer tapped /start*",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logging.error(f"Failed to notify admin thread: {e}")
 
 async def forward_to_admin_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Customer sends message in bot -> forward to their specific forum topic"""
     if not update.effective_chat or update.effective_chat.type != "private":
         return
     if not update.effective_user or not update.message:
@@ -154,6 +153,11 @@ async def forward_to_admin_topic(update: Update, context: ContextTypes.DEFAULT_T
 
     thread_id = await ensure_user_topic(update.effective_user, context)
     if not thread_id:
+        # Fallback to general admin chat if topics fail
+        await context.bot.send_message(
+            chat_id=ADMIN_GROUP_ID,
+            text=f"⚠️ Message from {update.effective_user.full_name} (`{update.effective_user.id}`):\n{update.message.text}"
+        )
         return
 
     try:
@@ -167,12 +171,9 @@ async def forward_to_admin_topic(update: Update, context: ContextTypes.DEFAULT_T
         logging.error(f"Error copying message to admin topic: {e}")
 
 async def reply_from_admin_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin types inside a forum topic -> forward message directly to the customer's private chat"""
     if not update.effective_chat or update.effective_chat.id != ADMIN_GROUP_ID:
         return
-    if not update.message:
-        return
-    if update.effective_user and update.effective_user.is_bot:
+    if not update.message or (update.effective_user and update.effective_user.is_bot):
         return
 
     thread_id = update.message.message_thread_id
@@ -181,7 +182,7 @@ async def reply_from_admin_topic(update: Update, context: ContextTypes.DEFAULT_T
 
     customer_id = thread_to_user.get(thread_id)
     if not customer_id:
-        await update.message.reply_text("⚠️ No mapped customer for this topic. Ask customer to send a message to the bot first.")
+        await update.message.reply_text("⚠️ No user mapped to this topic. Ask customer to send a message.")
         return
 
     try:
@@ -270,8 +271,6 @@ async def handle_order_actions(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logging.error(f"Failed to send rejection DM to {user_id}: {e}")
 
-# --- Application Lifespan ---
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global tg_app
@@ -286,12 +285,12 @@ async def lifespan(app: FastAPI):
     await tg_app.start()
 
     webhook_url = f"{RENDER_URL}/telegram-webhook"
-    await tg_app.bot.set_webhook(
+    res = await tg_app.bot.set_webhook(
         url=webhook_url,
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES
     )
-    logging.info(f"Telegram Webhook set: {webhook_url}")
+    logging.info(f"Webhook set response: {res} -> URL: {webhook_url}")
 
     yield
 
@@ -309,9 +308,10 @@ async def telegram_webhook(request: Request):
     try:
         req_data = await request.json()
         update = Update.de_json(req_data, tg_app.bot)
-        asyncio.create_task(tg_app.process_update(update))
+        # Run directly without detaching to guarantee execution in the event loop
+        await tg_app.process_update(update)
     except Exception as e:
-        logging.error(f"Error scheduling webhook update: {e}")
+        logging.error(f"Error handling webhook payload: {e}")
     return Response(status_code=200)
 
 @api.api_route("/", methods=["GET", "HEAD"])
