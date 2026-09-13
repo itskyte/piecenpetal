@@ -36,9 +36,34 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-user_to_thread = {}
-thread_to_user = {}
 CUSTOMER_DB_FILE = "customers.json"
+THREADS_DB_FILE = "threads.json"
+
+# --- Persistent Storage Helpers ---
+
+def load_threads():
+    if os.path.exists(THREADS_DB_FILE):
+        try:
+            with open(THREADS_DB_FILE, "r") as f:
+                data = json.load(f)
+                u2t = {int(k): int(v) for k, v in data.get("user_to_thread", {}).items()}
+                t2u = {int(k): int(v) for k, v in data.get("thread_to_user", {}).items()}
+                return u2t, t2u
+        except Exception as e:
+            logging.error(f"Failed to load threads: {e}")
+    return {}, {}
+
+user_to_thread, thread_to_user = load_threads()
+
+def save_threads():
+    try:
+        with open(THREADS_DB_FILE, "w") as f:
+            json.dump({
+                "user_to_thread": user_to_thread,
+                "thread_to_user": thread_to_user
+            }, f)
+    except Exception as e:
+        logging.error(f"Failed to save threads: {e}")
 
 def save_customer(user_id: int):
     try:
@@ -53,49 +78,49 @@ def save_customer(user_id: int):
     except Exception as e:
         logging.error(f"Error saving customer: {e}")
 
-def get_all_customers() -> list:
-    if os.path.exists(CUSTOMER_DB_FILE):
-        try:
-            with open(CUSTOMER_DB_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
-
 tg_app = None
+
+# --- Telegram Handlers ---
 
 async def ensure_user_topic(user, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = user.id
     save_customer(user_id)
 
-    if user_id not in user_to_thread:
-        topic_name = f"🌸 {user.full_name[:18]} ({user_id})"
-        try:
-            topic = await context.bot.create_forum_topic(
-                chat_id=ADMIN_GROUP_ID,
-                name=topic_name
-            )
-            thread_id = topic.message_thread_id
-            user_to_thread[user_id] = thread_id
-            thread_to_user[thread_id] = user_id
+    # 1. Return existing thread if already mapped
+    if user_id in user_to_thread:
+        return user_to_thread[user_id]
 
-            profile_card = (
-                f"🛍️ *New Customer Profile:*\n"
-                f"• Client: {user.full_name}\n"
-                f"• Handle: @{user.username if user.username else 'None'}\n"
-                f"• ID: `{user_id}`\n"
-                f"────────────────────"
-            )
-            await context.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                message_thread_id=thread_id,
-                text=profile_card,
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.error(f"Error creating topic: {e}")
-            return None
-    return user_to_thread.get(user_id)
+    # 2. Otherwise, create a new forum topic in the admin group
+    topic_name = f"🌸 {user.full_name[:18]} ({user_id})"
+    try:
+        topic = await context.bot.create_forum_topic(
+            chat_id=ADMIN_GROUP_ID,
+            name=topic_name
+        )
+        thread_id = topic.message_thread_id
+        
+        # Save mapping both in memory and to disk
+        user_to_thread[user_id] = thread_id
+        thread_to_user[thread_id] = user_id
+        save_threads()
+
+        profile_card = (
+            f"🛍️ *New Customer Profile:*\n"
+            f"• Client: {user.full_name}\n"
+            f"• Handle: @{user.username if user.username else 'None'}\n"
+            f"• ID: `{user_id}`\n"
+            f"────────────────────"
+        )
+        await context.bot.send_message(
+            chat_id=ADMIN_GROUP_ID,
+            message_thread_id=thread_id,
+            text=profile_card,
+            parse_mode="Markdown"
+        )
+        return thread_id
+    except Exception as e:
+        logging.error(f"Error creating forum topic for user {user_id}: {e}")
+        return None
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_chat or update.effective_chat.type != "private":
@@ -110,7 +135,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "បងៗចង់ស្វែងរក ឬចង់ទិញផលិតផលអ្វី អាចទម្លាក់សារមក ក្រុមការងារនឹងឆ្លើយតបជូនភ្លាមៗណា៎ 😍"
     )
     await update.message.reply_text(welcome_text, parse_mode="Markdown")
-    
+
     thread_id = await ensure_user_topic(update.effective_user, context)
     if thread_id:
         await context.bot.send_message(
@@ -120,13 +145,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+async def forward_to_admin_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Customer sends message in bot -> forward to their specific forum topic"""
+    if not update.effective_chat or update.effective_chat.type != "private":
+        return
+    if not update.effective_user or not update.message:
+        return
+
+    thread_id = await ensure_user_topic(update.effective_user, context)
+    if not thread_id:
+        return
+
+    try:
+        await context.bot.copy_message(
+            chat_id=ADMIN_GROUP_ID,
+            message_thread_id=thread_id,
+            from_chat_id=update.effective_chat.id,
+            message_id=update.message.message_id
+        )
+    except Exception as e:
+        logging.error(f"Error copying message to admin topic: {e}")
+
+async def reply_from_admin_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin types inside a forum topic -> forward message directly to the customer's private chat"""
+    if not update.effective_chat or update.effective_chat.id != ADMIN_GROUP_ID:
+        return
+    if not update.message:
+        return
+    if update.effective_user and update.effective_user.is_bot:
+        return
+
+    thread_id = update.message.message_thread_id
+    if not thread_id:
+        return
+
+    customer_id = thread_to_user.get(thread_id)
+    if not customer_id:
+        await update.message.reply_text("⚠️ No mapped customer for this topic. Ask customer to send a message to the bot first.")
+        return
+
+    try:
+        await context.bot.copy_message(
+            chat_id=customer_id,
+            from_chat_id=ADMIN_GROUP_ID,
+            message_id=update.message.message_id
+        )
+    except Exception as e:
+        logging.error(f"Failed to copy admin reply to customer {customer_id}: {e}")
+        await update.message.reply_text(f"❌ Delivery failed: {e}")
+
 async def handle_order_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Reliable callback handler that won't blink or lose state."""
     query = update.callback_query
     if not query:
         return
 
-    # Stop Telegram's loading spinner immediately
     await query.answer()
 
     data = query.data.split(":")
@@ -137,8 +209,6 @@ async def handle_order_actions(update: Update, context: ContextTypes.DEFAULT_TYP
 
     msg = query.message
     base_text = msg.text or "Order Details"
-
-    # Remove the call-to-action line if present
     if "💬 Tap below" in base_text:
         base_text = base_text.split("💬 Tap below")[0].strip()
 
@@ -148,9 +218,7 @@ async def handle_order_actions(update: Update, context: ContextTypes.DEFAULT_TYP
             f"────────────────────\n"
             f"✅ PAYMENT CONFIRMED by {admin_name} at {time_str}"
         )
-
         try:
-            # Edit the message in the forum group and remove buttons
             await context.bot.edit_message_text(
                 chat_id=msg.chat.id,
                 message_id=msg.message_id,
@@ -160,7 +228,6 @@ async def handle_order_actions(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logging.error(f"Failed to edit admin card: {e}")
 
-        # Send official receipt DM to customer
         try:
             await context.bot.send_message(
                 chat_id=user_id,
@@ -172,7 +239,7 @@ async def handle_order_actions(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode="Markdown"
             )
         except Exception as e:
-            logging.error(f"Failed to notify customer {user_id}: {e}")
+            logging.error(f"Failed to send confirmation DM to {user_id}: {e}")
 
     elif action == "reject_order":
         updated_card = (
@@ -180,7 +247,6 @@ async def handle_order_actions(update: Update, context: ContextTypes.DEFAULT_TYP
             f"────────────────────\n"
             f"❌ PAYMENT REJECTED by {admin_name} at {time_str}"
         )
-
         try:
             await context.bot.edit_message_text(
                 chat_id=msg.chat.id,
@@ -202,50 +268,9 @@ async def handle_order_actions(update: Update, context: ContextTypes.DEFAULT_TYP
                 parse_mode="Markdown"
             )
         except Exception as e:
-            logging.error(f"Failed to notify customer {user_id}: {e}")
+            logging.error(f"Failed to send rejection DM to {user_id}: {e}")
 
-async def forward_to_admin_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_chat or update.effective_chat.type != "private":
-        return
-    if not update.effective_user or not update.message:
-        return
-
-    thread_id = await ensure_user_topic(update.effective_user, context)
-    if not thread_id:
-        return
-
-    await context.bot.copy_message(
-        chat_id=ADMIN_GROUP_ID,
-        message_thread_id=thread_id,
-        from_chat_id=update.effective_chat.id,
-        message_id=update.message.message_id
-    )
-
-async def reply_from_admin_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_chat or update.effective_chat.id != ADMIN_GROUP_ID:
-        return
-    if not update.message:
-        return
-    if update.effective_user and update.effective_user.is_bot:
-        return
-
-    thread_id = update.message.message_thread_id
-    if not thread_id:
-        return
-
-    customer_id = thread_to_user.get(thread_id)
-    if not customer_id:
-        await update.message.reply_text("⚠️ Mapping lost after restart. Ask customer to send a message.")
-        return
-
-    try:
-        await context.bot.copy_message(
-            chat_id=customer_id,
-            from_chat_id=ADMIN_GROUP_ID,
-            message_id=update.message.message_id
-        )
-    except Exception as e:
-        logging.error(f"Failed to copy message: {e}")
+# --- Application Lifespan ---
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -266,7 +291,7 @@ async def lifespan(app: FastAPI):
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES
     )
-    logging.info(f"Telegram Webhook active at: {webhook_url}")
+    logging.info(f"Telegram Webhook set: {webhook_url}")
 
     yield
 
@@ -286,7 +311,7 @@ async def telegram_webhook(request: Request):
         update = Update.de_json(req_data, tg_app.bot)
         asyncio.create_task(tg_app.process_update(update))
     except Exception as e:
-        logging.error(f"Error handling webhook: {e}")
+        logging.error(f"Error scheduling webhook update: {e}")
     return Response(status_code=200)
 
 @api.api_route("/", methods=["GET", "HEAD"])
@@ -335,14 +360,13 @@ async def get_products():
                 "size": clean_row.get("size", "-"),
                 "image": clean_row.get("image", ""),
                 "tag": clean_row.get("tag", ""),
-                "description": clean_row.get("description", "Authentic Japanese product curated directly from Tokyo.")
+                "description": clean_row.get("description", "Authentic Japanese item.")
             })
         return items
     except Exception as e:
         logging.error(f"Failed to fetch products: {e}")
         return []
 
-# Endpoint for "Ask about this product" button
 @api.post("/api/inquire")
 async def inquire(request: Request):
     data = await request.json()
@@ -361,15 +385,16 @@ async def inquire(request: Request):
             thread_id = topic.message_thread_id
             user_to_thread[user_id] = thread_id
             thread_to_user[thread_id] = user_id
+            save_threads()
         except Exception as e:
-            logging.error(f"Topic creation failed during inquiry: {e}")
+            logging.error(f"Failed to create topic on inquiry: {e}")
 
     inquiry_msg = (
         f"🙋 *PRODUCT INQUIRY*\n"
         f"────────────────────\n"
-        f"Customer is asking about:\n"
+        f"Customer asked about:\n"
         f"👉 *{product_title}*\n\n"
-        f"💬 Reply directly in this topic to chat with them."
+        f"💬 Reply in this topic to chat with the customer."
     )
 
     try:
@@ -416,8 +441,9 @@ async def checkout(request: Request):
                 thread_id = topic.message_thread_id
                 user_to_thread[user_id] = thread_id
                 thread_to_user[thread_id] = user_id
+                save_threads()
             except Exception as e:
-                logging.error(f"Error creating topic: {e}")
+                logging.error(f"Error creating topic during checkout: {e}")
 
     if ORDER_WEBHOOK_URL:
         try:
