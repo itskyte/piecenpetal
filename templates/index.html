@@ -70,7 +70,7 @@
         </div>
         <div class="bg-stone-50 border border-stone-200/70 p-2.5 rounded-xl flex items-center space-x-2">
           <span>💳</span>
-          <span>ABA / KHQR Payment</span>
+          <span>ABA / All Banks</span>
         </div>
       </div>
 
@@ -123,11 +123,11 @@
 
   <!-- Checkout Drawer -->
   <div id="checkout-modal" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm hidden flex items-end">
-    <div class="bg-white w-full rounded-t-3xl max-h-[90vh] overflow-y-auto p-6 space-y-5 hide-scrollbar">
+    <div class="bg-white w-full rounded-t-3xl max-h-[92vh] overflow-y-auto p-6 space-y-5 hide-scrollbar">
       <div class="flex justify-between items-center pb-2 border-b border-stone-100">
         <div>
           <h2 class="text-base font-semibold text-stone-900">Checkout Summary</h2>
-          <p class="text-[11px] text-stone-400">Review details & complete payment</p>
+          <p class="text-[11px] text-stone-400">Transfer & send receipt to verify</p>
         </div>
         <button onclick="closeCheckout()" class="text-stone-400 hover:text-stone-700 text-sm font-medium">Close</button>
       </div>
@@ -149,34 +149,51 @@
         </div>
       </div>
 
-      <!-- Payment Section: One-Tap PayWay + QR Fallback -->
-      <div class="p-4 bg-sky-50/50 rounded-2xl border border-sky-100 text-center space-y-3">
+      <!-- Payment Section: QR + Save QR + Copy Account Number -->
+      <div class="p-4 bg-[#F8F9FA] rounded-2xl border border-stone-200 text-center space-y-3">
         <div class="flex items-center justify-between px-1">
-          <p class="text-xs font-bold uppercase tracking-wider text-sky-950">ABA / KHQR Payment</p>
-          <span class="text-[10px] font-semibold text-sky-700 bg-sky-150 px-2 py-0.5 rounded-full">Secure PayWay</span>
+          <p class="text-xs font-bold uppercase tracking-wider text-stone-800">Payment Details</p>
+          <span class="text-[10px] font-bold text-sky-800 bg-sky-100 px-2 py-0.5 rounded-full">ABA • KHQR</span>
         </div>
 
-        <!-- One-Tap Link Button -->
-        <button type="button" onclick="payViaAbaLink()" class="w-full py-3.5 bg-[#005A9C] hover:bg-[#004A80] active:scale-[0.98] text-white rounded-xl text-xs font-bold shadow-md transition flex items-center justify-center space-x-2">
-          <span>📲</span>
-          <span id="aba-btn-text">Pay via ABA Mobile App</span>
-        </button>
-
-        <div class="flex items-center my-2">
-          <div class="flex-grow border-t border-stone-200"></div>
-          <span class="px-2 text-[10px] text-stone-400 uppercase font-medium">Or scan QR</span>
-          <div class="flex-grow border-t border-stone-200"></div>
+        <!-- Total Amount to Pay -->
+        <div class="bg-white p-3 rounded-xl border border-stone-200 shadow-sm flex items-center justify-between">
+          <span class="text-xs text-stone-500 font-medium">Total to transfer:</span>
+          <span id="transfer-amount-display" class="text-base font-extrabold text-stone-900">$0.00</span>
         </div>
 
         <!-- QR Display -->
-        <div class="w-44 h-44 mx-auto bg-white p-2 rounded-xl shadow-sm border border-stone-200 flex items-center justify-center overflow-hidden">
-          <img src="/static/khqr.png" alt="Piece & Petal KHQR" class="w-full h-full object-contain" onerror="this.parentElement.innerHTML='<span class=\'text-xs text-stone-400\'>Add khqr.png to templates/</span>'">
+        <div class="w-48 h-48 mx-auto bg-white p-2 rounded-xl shadow-sm border border-stone-200 flex items-center justify-center overflow-hidden">
+          <img id="qr-img-tag" src="/static/khqr.png" alt="Piece & Petal KHQR" class="w-full h-full object-contain">
         </div>
-        <p class="text-[11px] text-stone-500">Scan via ABA Mobile or any KHQR Bank App</p>
+
+        <!-- Quick Action Buttons: Save QR & Copy Account Number -->
+        <div class="grid grid-cols-2 gap-2 pt-1">
+          <button type="button" onclick="saveOrOpenQr()" class="py-2.5 px-3 bg-white border border-stone-300 hover:bg-stone-50 active:scale-[0.98] rounded-xl text-xs font-semibold text-stone-800 shadow-sm flex items-center justify-center space-x-1.5 transition">
+            <span>💾</span>
+            <span>Save / View QR</span>
+          </button>
+          
+          <button type="button" id="copy-acc-btn" onclick="copyAccountNumber()" class="py-2.5 px-3 bg-white border border-stone-300 hover:bg-stone-50 active:scale-[0.98] rounded-xl text-xs font-semibold text-stone-800 shadow-sm flex items-center justify-center space-x-1.5 transition">
+            <span>📋</span>
+            <span id="copy-btn-label">Copy ABA No.</span>
+          </button>
+        </div>
+
+        <div class="p-2.5 bg-sky-50/70 rounded-xl border border-sky-150 text-[11px] text-sky-900 text-left space-y-1">
+          <p class="font-bold flex items-center justify-between">
+            <span>ABA: KEVIN KEO</span>
+            <span class="font-mono font-bold text-sky-950">010 799 300</span>
+          </p>
+          <p class="text-[10px] text-sky-700 leading-tight">
+            1. Save QR ឬ Copy លេខកុងដើម្បីផ្ទេរតាម App ធនាគារ<br>
+            2. បន្ទាប់ពីផ្ទេររួច ចុចប៊ូតុងខាងក្រោម រួចផ្ញើ Slip ចូលក្នុង Chat
+          </p>
+        </div>
       </div>
 
-      <button id="submit-btn" onclick="submitOrder()" class="w-full bg-stone-900 text-white py-4 rounded-xl text-sm font-semibold active:scale-[0.98] transition">
-        I Have Transferred • Submit Order
+      <button id="submit-btn" onclick="submitOrder()" class="w-full bg-stone-900 hover:bg-stone-800 text-white py-4 rounded-xl text-sm font-semibold active:scale-[0.98] transition">
+        I Have Paid • Send Slip in Chat
       </button>
     </div>
   </div>
@@ -184,11 +201,13 @@
   <!-- Success Confirmation Screen -->
   <div id="success-screen" class="fixed inset-0 z-50 bg-[#FAF8F5] hidden flex flex-col items-center justify-center p-6 text-center">
     <div class="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mb-4 text-2xl font-bold">✓</div>
-    <h2 class="text-xl font-bold text-stone-900">Order Successfully Placed!</h2>
-    <p class="text-sm text-stone-500 mt-2 max-w-xs leading-relaxed">
-      អរគុណបង! ក្រុមការងារបានទទួលការកម្ម៉ង់ហើយ។ យើងខ្ញុំកំពុងផ្ទៀងផ្ទាត់ការទូទាត់ប្រាក់ និងឆ្លើយតបបញ្ជាក់ជូនក្នុង Chat ភ្លាមៗ។
+    <h2 class="text-xl font-bold text-stone-900">Order Submitted!</h2>
+    <p class="text-sm text-stone-600 mt-2 max-w-xs leading-relaxed">
+      អរគុណបង! សូមចុចប៊ូតុងខាងក្រោមដើម្បី <span class="font-bold text-stone-900">ផ្ញើរូបភាព Slip ផ្ទេរប្រាក់</span> ចូលក្នុង Chat នេះ ដើម្បីក្រុមការងារផ្ទៀងផ្ទាត់ និងរៀបចំឥវ៉ាន់ជូនបងភ្លាមៗណា៎ ✨
     </p>
-    <button onclick="dismissSuccess()" class="mt-8 px-8 py-3 bg-stone-900 text-white rounded-xl text-sm font-semibold">Continue Browsing</button>
+    <button onclick="dismissSuccess()" class="mt-8 w-full max-w-xs py-3.5 bg-stone-900 text-white rounded-xl text-sm font-semibold active:scale-[0.98] transition">
+      📸 Open Chat to Send Slip
+    </button>
   </div>
 
   <script>
@@ -198,8 +217,7 @@
       tg.ready();
     }
 
-    // SWAP THIS URL WITH YOUR LIVE PAYWAY LINK ONCE APPROVED:
-    const ABA_PAYMENT_URL = "https://bakong.nbc.gov.kh/khqr/pay?qr=00020101021129450016abaakhppxxx@abaa01090107993000208ABA Bank40600006abaP2P0112BE1B7F24328B020901079930003090021728600404Dual5204000053031165802KH5909KEVIN KEO6010Phnom Penh6304309F";
+    const ABA_ACCOUNT_NUMBER = "010799300";
 
     let allProducts = [];
     let activeFilter = 'All';
@@ -217,6 +235,31 @@
         document.getElementById('cust-name').value = localStorage.getItem('p_name');
       }
     });
+
+    function saveOrOpenQr() {
+      const qrUrl = window.location.origin + "/static/khqr.png";
+      if (tg && tg.openLink) {
+        tg.openLink(qrUrl);
+      } else {
+        window.open(qrUrl, '_blank');
+      }
+    }
+
+    function copyAccountNumber() {
+      navigator.clipboard.writeText(ABA_ACCOUNT_NUMBER).then(() => {
+        const btnLabel = document.getElementById('copy-btn-label');
+        const originalText = btnLabel.innerText;
+        btnLabel.innerText = "Copied!";
+        btnLabel.parentElement.classList.add('bg-emerald-50', 'text-emerald-700', 'border-emerald-300');
+        
+        setTimeout(() => {
+          btnLabel.innerText = originalText;
+          btnLabel.parentElement.classList.remove('bg-emerald-50', 'text-emerald-700', 'border-emerald-300');
+        }, 2000);
+      }).catch(() => {
+        alert("Account: " + ABA_ACCOUNT_NUMBER);
+      });
+    }
 
     async function fetchCatalog() {
       try {
@@ -441,17 +484,9 @@
       `;
       list.innerHTML = html;
 
-      const abaBtn = document.getElementById('aba-btn-text');
-      if (abaBtn && total > 0) {
-        abaBtn.innerText = `Pay $${total.toFixed(2)} via ABA Mobile`;
-      }
-    }
-
-    function payViaAbaLink() {
-      if (tg && tg.openLink) {
-        tg.openLink(ABA_PAYMENT_URL);
-      } else {
-        window.open(ABA_PAYMENT_URL, '_blank');
+      const amtDisplay = document.getElementById('transfer-amount-display');
+      if (amtDisplay) {
+        amtDisplay.innerText = `$${total.toFixed(2)}`;
       }
     }
 
@@ -535,7 +570,7 @@
         alert('Network connection error. Please try again.');
       } finally {
         submitBtn.disabled = false;
-        submitBtn.innerText = 'I Have Transferred • Submit Order';
+        submitBtn.innerText = 'I Have Paid • Send Slip in Chat';
       }
     }
 
