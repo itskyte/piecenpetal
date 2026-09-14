@@ -4,10 +4,7 @@ import csv
 import json
 import logging
 import asyncio
-import base64
-import hmac
-import hashlib
-from datetime import datetime, timezone
+from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Response
@@ -34,14 +31,6 @@ RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://piecenpetal-bot.onre
 SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1oBJ0mo_qWO6fRo6t8YfdOG-_EaUsDwhLP5mISOw-hrE")
 CSV_EXPORT_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
 ORDER_WEBHOOK_URL = os.environ.get("ORDER_WEBHOOK_URL", "")
-
-# ABA PayWay Sandbox Settings
-ABA_MERCHANT_ID = os.environ.get("ABA_MERCHANT_ID", "")
-ABA_API_KEY = os.environ.get("ABA_API_KEY", "")
-ABA_API_URL = os.environ.get(
-    "ABA_API_URL", 
-    "https://checkout-sandbox.payway.com.kh/api/payment-gateway/v1/payments/generate-qr"
-)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -134,8 +123,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not update.effective_user or not update.message:
         return
-
-    logging.info(f"Processing /start from user: {update.effective_user.id}")
 
     welcome_text = (
         "🌸 *Welcome to Piece & Petal* 🇯🇵✨\n\n"
@@ -390,70 +377,6 @@ async def get_products():
     except Exception as e:
         logging.error(f"Failed to fetch catalog: {e}")
         return []
-
-# --- ABA PayWay Payment Generation ---
-def generate_aba_qr_hash(fields_dict: dict, key: str) -> str:
-    """Concatenate fields according to ABA PayWay /generate-qr signature requirements."""
-    field_order = [
-        "req_time", "merchant_id", "tran_id", "amount", "items", "first_name", 
-        "last_name", "email", "phone", "purchase_type", "payment_option", 
-        "callback_url", "return_deeplink", "currency", "custom_fields", 
-        "return_params", "payout", "lifetime", "qr_image_template"
-    ]
-    raw_str = "".join([str(fields_dict.get(k, "")) for k in field_order])
-    signature = hmac.new(key.encode("utf-8"), raw_str.encode("utf-8"), hashlib.sha512).digest()
-    return base64.b64encode(signature).decode("utf-8")
-
-@api.post("/api/create-aba-payment")
-async def create_aba_payment(request: Request):
-    data = await request.json()
-    amount = float(data.get("amount", 0.0))
-    customer_name = data.get("customer_name", "Customer")
-    phone = data.get("phone", "012345678")
-
-    req_time = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-    tran_id = f"PP{int(datetime.now().timestamp())}"
-    
-    # Base64 encoded empty items array as required by ABA
-    items_json = json.dumps([{"name": "Piece & Petal Drop", "quantity": 1, "price": amount}])
-    items_b64 = base64.b64encode(items_json.encode("utf-8")).decode("utf-8")
-
-    payload_fields = {
-        "req_time": req_time,
-        "merchant_id": ABA_MERCHANT_ID,
-        "tran_id": tran_id,
-        "amount": f"{amount:.2f}",
-        "items": items_b64,
-        "first_name": customer_name[:15],
-        "last_name": "P&P",
-        "email": "customer@pieceandpetal.com",
-        "phone": phone,
-        "purchase_type": "purchase",
-        "payment_option": "abapay_khqr",
-        "currency": "USD",
-        "lifetime": 15
-    }
-
-    payload_fields["hash"] = generate_aba_qr_hash(payload_fields, ABA_API_KEY)
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(ABA_API_URL, json=payload_fields)
-            res_data = resp.json()
-
-        if res_data.get("status", {}).get("code") == "0":
-            return {
-                "status": "success",
-                "tran_id": tran_id,
-                "qr_image": res_data.get("qrImage"),
-                "abapay_deeplink": res_data.get("abapay_deeplink")
-            }
-        else:
-            logging.error(f"ABA API Error: {res_data}")
-            return {"status": "error", "message": res_data.get("status", {}).get("message", "ABA error")}
-    except Exception as e:
-        logging.error(f"Error calling ABA gateway: {e}")
-        return {"status": "error", "message": str(e)}
 
 @api.post("/api/inquire")
 async def inquire(request: Request):
