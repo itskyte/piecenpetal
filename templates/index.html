@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>Piece & Petal — Your Beauty Starts Here</title>
+  <title>Piece & Petal — Tokyo Drops</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -127,7 +127,7 @@
       <div class="flex justify-between items-center pb-2 border-b border-stone-100">
         <div>
           <h2 class="text-base font-semibold text-stone-900">Checkout Summary</h2>
-          <p class="text-[11px] text-stone-400">PayWay Sandbox Integration</p>
+          <p class="text-[11px] text-stone-400">Review details & complete payment</p>
         </div>
         <button onclick="closeCheckout()" class="text-stone-400 hover:text-stone-700 text-sm font-medium">Close</button>
       </div>
@@ -149,25 +149,34 @@
         </div>
       </div>
 
-      <!-- ABA PayWay Gateway Box -->
+      <!-- Payment Section: One-Tap PayWay + QR Fallback -->
       <div class="p-4 bg-sky-50/50 rounded-2xl border border-sky-100 text-center space-y-3">
-        <p class="text-xs font-semibold uppercase tracking-wider text-sky-900">ABA PayWay Instant Payment</p>
-        
-        <!-- One-Tap Deep Link Button -->
-        <button id="aba-deeplink-btn" onclick="openAbaMobileDirect()" class="hidden w-full py-3 bg-[#005A9C] text-white rounded-xl text-xs font-bold shadow-md hover:bg-[#004A80] transition flex items-center justify-center space-x-2">
+        <div class="flex items-center justify-between px-1">
+          <p class="text-xs font-bold uppercase tracking-wider text-sky-950">ABA / KHQR Payment</p>
+          <span class="text-[10px] font-semibold text-sky-700 bg-sky-150 px-2 py-0.5 rounded-full">Secure PayWay</span>
+        </div>
+
+        <!-- One-Tap Link Button -->
+        <button type="button" onclick="payViaAbaLink()" class="w-full py-3.5 bg-[#005A9C] hover:bg-[#004A80] active:scale-[0.98] text-white rounded-xl text-xs font-bold shadow-md transition flex items-center justify-center space-x-2">
           <span>📲</span>
-          <span id="aba-btn-text">Open ABA Mobile to Pay</span>
+          <span id="aba-btn-text">Pay via ABA Mobile App</span>
         </button>
 
-        <!-- Dynamic / Fallback QR Display -->
-        <div class="w-48 h-48 mx-auto bg-white p-2 rounded-xl shadow-sm border border-stone-200 flex items-center justify-center overflow-hidden">
-          <img id="qr-display" src="/static/khqr.png" alt="KHQR" class="w-full h-full object-contain" onerror="this.parentElement.innerHTML='<span class=\'text-xs text-stone-400\'>No QR Found</span>'">
+        <div class="flex items-center my-2">
+          <div class="flex-grow border-t border-stone-200"></div>
+          <span class="px-2 text-[10px] text-stone-400 uppercase font-medium">Or scan QR</span>
+          <div class="flex-grow border-t border-stone-200"></div>
+        </div>
+
+        <!-- QR Display -->
+        <div class="w-44 h-44 mx-auto bg-white p-2 rounded-xl shadow-sm border border-stone-200 flex items-center justify-center overflow-hidden">
+          <img src="/static/khqr.png" alt="Piece & Petal KHQR" class="w-full h-full object-contain" onerror="this.parentElement.innerHTML='<span class=\'text-xs text-stone-400\'>Add khqr.png to templates/</span>'">
         </div>
         <p class="text-[11px] text-stone-500">Scan via ABA Mobile or any KHQR Bank App</p>
       </div>
 
       <button id="submit-btn" onclick="submitOrder()" class="w-full bg-stone-900 text-white py-4 rounded-xl text-sm font-semibold active:scale-[0.98] transition">
-        I Have Paid • Submit Order
+        I Have Transferred • Submit Order
       </button>
     </div>
   </div>
@@ -189,13 +198,14 @@
       tg.ready();
     }
 
+    // SWAP THIS URL WITH YOUR LIVE PAYWAY LINK ONCE APPROVED:
+    const ABA_PAYMENT_URL = "https://link-sandbox.payway.com.kh/ch91174U";
+
     let allProducts = [];
     let activeFilter = 'All';
     let cart = {};
     let selectedProduct = null;
-    let currentAbaDeeplink = null;
 
-    // Load saved info from localStorage
     document.addEventListener("DOMContentLoaded", () => {
       if (localStorage.getItem('p_phone')) {
         document.getElementById('cust-phone').value = localStorage.getItem('p_phone');
@@ -372,7 +382,6 @@
       updateCartBar();
       if (!document.getElementById('checkout-modal').classList.contains('hidden')) {
         renderOrderItems();
-        generateAbaCheckoutDetails();
       }
     }
 
@@ -431,60 +440,24 @@
         </div>
       `;
       list.innerHTML = html;
-    }
 
-    async function generateAbaCheckoutDetails() {
-      let total = 0;
-      for (const [id, qty] of Object.entries(cart)) {
-        const prod = allProducts.find(p => p.id === id);
-        if (prod) total += prod.price * qty;
-      }
-      if (total <= 0) return;
-
-      const custName = document.getElementById('cust-name').value || 'Customer';
-      const custPhone = document.getElementById('cust-phone').value || '012345678';
-
-      try {
-        const res = await fetch('/api/create-aba-payment', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            amount: total,
-            customer_name: custName,
-            phone: custPhone
-          })
-        });
-        const data = await res.json();
-
-        if (data.status === 'success') {
-          if (data.qr_image) {
-            document.getElementById('qr-display').src = data.qr_image;
-          }
-          if (data.abapay_deeplink) {
-            currentAbaDeeplink = data.abapay_deeplink;
-            const btn = document.getElementById('aba-deeplink-btn');
-            document.getElementById('aba-btn-text').innerText = `Pay $${total.toFixed(2)} in ABA Mobile`;
-            btn.classList.remove('hidden');
-          }
-        }
-      } catch (err) {
-        console.warn("Could not generate dynamic ABA QR; falling back to static QR.", err);
+      const abaBtn = document.getElementById('aba-btn-text');
+      if (abaBtn && total > 0) {
+        abaBtn.innerText = `Pay $${total.toFixed(2)} via ABA Mobile`;
       }
     }
 
-    function openAbaMobileDirect() {
-      if (!currentAbaDeeplink) return;
+    function payViaAbaLink() {
       if (tg && tg.openLink) {
-        tg.openLink(currentAbaDeeplink);
+        tg.openLink(ABA_PAYMENT_URL);
       } else {
-        window.location.href = currentAbaDeeplink;
+        window.open(ABA_PAYMENT_URL, '_blank');
       }
     }
 
     function openCheckout() {
       renderOrderItems();
       document.getElementById('checkout-modal').classList.remove('hidden');
-      generateAbaCheckoutDetails();
     }
 
     function closeCheckout() {
@@ -516,7 +489,6 @@
 
       if (hasError) return;
 
-      // Save for repeat customers
       localStorage.setItem('p_phone', phone);
       localStorage.setItem('p_address', address);
       if (name) localStorage.setItem('p_name', name);
@@ -563,7 +535,7 @@
         alert('Network connection error. Please try again.');
       } finally {
         submitBtn.disabled = false;
-        submitBtn.innerText = 'I Have Paid • Submit Order';
+        submitBtn.innerText = 'I Have Transferred • Submit Order';
       }
     }
 
