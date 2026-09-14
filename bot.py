@@ -39,7 +39,6 @@ logging.basicConfig(
 CUSTOMER_DB_FILE = "customers.json"
 THREADS_DB_FILE = "threads.json"
 
-# --- Thread Persistence ---
 def load_threads():
     if os.path.exists(THREADS_DB_FILE):
         try:
@@ -148,6 +147,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logging.error(f"Failed to alert admin topic: {e}")
 
+# Forward all customer text and media (photos/receipts) to their admin topic
 async def forward_to_admin_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_chat or update.effective_chat.type != "private":
         return
@@ -157,6 +157,15 @@ async def forward_to_admin_topic(update: Update, context: ContextTypes.DEFAULT_T
     thread_id = await ensure_user_topic(update.effective_user, context)
     try:
         if thread_id:
+            # If the user uploaded a photo or document (payment slip), label it clearly
+            if update.message.photo or update.message.document:
+                await context.bot.send_message(
+                    chat_id=ADMIN_GROUP_ID,
+                    message_thread_id=thread_id,
+                    text="🧾 *CUSTOMER SENT PAYMENT SLIP / RECEIPT:*",
+                    parse_mode="Markdown"
+                )
+            
             await context.bot.copy_message(
                 chat_id=ADMIN_GROUP_ID,
                 message_thread_id=thread_id,
@@ -166,7 +175,7 @@ async def forward_to_admin_topic(update: Update, context: ContextTypes.DEFAULT_T
         else:
             await context.bot.send_message(
                 chat_id=ADMIN_GROUP_ID,
-                text=f"💬 Message from {update.effective_user.full_name} ({update.effective_user.id}):\n{update.message.text}"
+                text=f"💬 Message from {update.effective_user.full_name} ({update.effective_user.id})"
             )
     except Exception as e:
         logging.error(f"Error copying message to admin: {e}")
@@ -288,6 +297,7 @@ async def lifespan(app: FastAPI):
 
     tg_app.add_handler(CommandHandler("start", start))
     tg_app.add_handler(CallbackQueryHandler(handle_order_actions, pattern="^(confirm_order|reject_order):"))
+    # Captures text, photos, and document receipts from customers
     tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, forward_to_admin_topic))
     tg_app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & ~filters.COMMAND, reply_from_admin_topic))
 
@@ -503,12 +513,13 @@ async def checkout(request: Request):
                 parse_mode="Markdown",
                 reply_markup=keyboard
             )
+            # Direct prompt in customer's chat asking for the slip
             await tg_app.bot.send_message(
                 chat_id=user_id,
                 text=(
                     f"🌸 *Piece & Petal Order Received!*\n\n"
                     f"អរគុណបង {customer_name}! ក្រុមការងារបានទទួលការបញ្ជាទិញតម្លៃ *${total:.2f}* រួចរាល់ហើយ។\n\n"
-                    f"យើងខ្ញុំកំពុងពិនិត្យការទូទាត់ប្រាក់ (Payment Confirmation) ហើយនឹងឆ្លើយតបបញ្ជាក់ជូនបងនៅទីនេះភ្លាមៗណា៎ ✨"
+                    f"📸 *សូមបងផ្ញើរូបភាព Slip ផ្ទេរប្រាក់មកក្នុង Chat នេះ* ដើម្បីឱ្យក្រុមការងារជួយពិនិត្យ និងរៀបចំឥវ៉ាន់ជូនបងណា៎ ✨"
                 ),
                 parse_mode="Markdown"
             )
