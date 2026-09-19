@@ -1,539 +1,654 @@
-import os
-import io
-import csv
-import json
-import logging
-import asyncio
-from datetime import datetime
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-import httpx
-import uvicorn
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
-)
-
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-ADMIN_GROUP_ID = int(os.environ.get("ADMIN_GROUP_ID", 0))
-PORT = int(os.environ.get("PORT", 8000))
-RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://piecenpetal-bot.onrender.com").rstrip("/")
-
-SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "1oBJ0mo_qWO6fRo6t8YfdOG-_EaUsDwhLP5mISOw-hrE")
-CSV_EXPORT_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
-ORDER_WEBHOOK_URL = os.environ.get("ORDER_WEBHOOK_URL", "")
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-
-CUSTOMER_DB_FILE = "customers.json"
-THREADS_DB_FILE = "threads.json"
-
-def load_threads():
-    if os.path.exists(THREADS_DB_FILE):
-        try:
-            with open(THREADS_DB_FILE, "r") as f:
-                data = json.load(f)
-                u2t = {int(k): int(v) for k, v in data.get("user_to_thread", {}).items()}
-                t2u = {int(k): int(v) for k, v in data.get("thread_to_user", {}).items()}
-                return u2t, t2u
-        except Exception as e:
-            logging.error(f"Failed to load threads: {e}")
-    return {}, {}
-
-user_to_thread, thread_to_user = load_threads()
-
-def save_threads():
-    try:
-        with open(THREADS_DB_FILE, "w") as f:
-            json.dump({
-                "user_to_thread": user_to_thread,
-                "thread_to_user": thread_to_user
-            }, f)
-    except Exception as e:
-        logging.error(f"Failed to save threads: {e}")
-
-def save_customer(user_id: int):
-    try:
-        data = []
-        if os.path.exists(CUSTOMER_DB_FILE):
-            with open(CUSTOMER_DB_FILE, "r") as f:
-                data = json.load(f)
-        if user_id not in data:
-            data.append(user_id)
-            with open(CUSTOMER_DB_FILE, "w") as f:
-                json.dump(data, f)
-    except Exception as e:
-        logging.error(f"Error saving customer: {e}")
-
-tg_app: Application = None
-update_queue: asyncio.Queue = None
-
-async def ensure_user_topic(user, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = user.id
-    save_customer(user_id)
-
-    if user_id in user_to_thread:
-        return user_to_thread[user_id]
-
-    clean_name = (user.full_name or "Customer").replace("\n", " ")[:18]
-    topic_name = f"🌸 {clean_name} ({user_id})"
-    
-    try:
-        topic = await context.bot.create_forum_topic(
-            chat_id=ADMIN_GROUP_ID,
-            name=topic_name
-        )
-        thread_id = topic.message_thread_id
-        user_to_thread[user_id] = thread_id
-        thread_to_user[thread_id] = user_id
-        save_threads()
-
-        profile_card = (
-            f"🛍️ *New Customer Profile:*\n"
-            f"• Name: {user.full_name}\n"
-            f"• Handle: @{user.username or 'None'}\n"
-            f"• User ID: `{user_id}`\n"
-            f"────────────────────"
-        )
-        await context.bot.send_message(
-            chat_id=ADMIN_GROUP_ID,
-            message_thread_id=thread_id,
-            text=profile_card,
-            parse_mode="Markdown"
-        )
-        return thread_id
-    except Exception as e:
-        logging.error(f"Could not create forum topic in {ADMIN_GROUP_ID}: {e}")
-        return None
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_chat or update.effective_chat.type != "private":
-        return
-    if not update.effective_user or not update.message:
-        return
-
-    welcome_text = (
-        "🌸 *Welcome to Piece & Petal* 🇯🇵✨\n\n"
-        "Piece & Petal មានលក់ Supplement, Skincare, Cosmetics, និងផលិតផលផ្សេងៗនាំចូលពីជប៉ុន\n\n"
-        "ឥវ៉ាន់ធានាសុទ្ធពីជប៉ុន 100% អ្នកលក់ទៅយកផ្ទាល់ពីហាង\n\n"
-        "បងៗចង់ស្វែងរក ឬចង់ទិញផលិតផលអ្វី អាចទម្លាក់សារមក ក្រុមការងារនឹងឆ្លើយតបជូនភ្លាមៗណា៎ 😍"
-    )
-    
-    try:
-        await update.message.reply_text(welcome_text, parse_mode="Markdown")
-    except Exception as e:
-        logging.error(f"Failed to send welcome text: {e}")
-
-    thread_id = await ensure_user_topic(update.effective_user, context)
-    if thread_id:
-        try:
-            await context.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                message_thread_id=thread_id,
-                text="⚡ *Customer opened bot (/start)*",
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.error(f"Failed to alert admin topic: {e}")
-
-# Forward all customer text and media (photos/receipts) to their admin topic
-async def forward_to_admin_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_chat or update.effective_chat.type != "private":
-        return
-    if not update.effective_user or not update.message:
-        return
-
-    thread_id = await ensure_user_topic(update.effective_user, context)
-    try:
-        if thread_id:
-            # If the user uploaded a photo or document (payment slip), label it clearly
-            if update.message.photo or update.message.document:
-                await context.bot.send_message(
-                    chat_id=ADMIN_GROUP_ID,
-                    message_thread_id=thread_id,
-                    text="🧾 *CUSTOMER SENT PAYMENT SLIP / RECEIPT:*",
-                    parse_mode="Markdown"
-                )
-            
-            await context.bot.copy_message(
-                chat_id=ADMIN_GROUP_ID,
-                message_thread_id=thread_id,
-                from_chat_id=update.effective_chat.id,
-                message_id=update.message.message_id
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                text=f"💬 Message from {update.effective_user.full_name} ({update.effective_user.id})"
-            )
-    except Exception as e:
-        logging.error(f"Error copying message to admin: {e}")
-
-async def reply_from_admin_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not update.effective_chat or update.effective_chat.id != ADMIN_GROUP_ID:
-        return
-    if not update.message or (update.effective_user and update.effective_user.is_bot):
-        return
-
-    thread_id = update.message.message_thread_id
-    if not thread_id:
-        return
-
-    customer_id = thread_to_user.get(thread_id)
-    if not customer_id:
-        return
-
-    try:
-        await context.bot.copy_message(
-            chat_id=customer_id,
-            from_chat_id=ADMIN_GROUP_ID,
-            message_id=update.message.message_id
-        )
-    except Exception as e:
-        logging.error(f"Failed to deliver admin reply to {customer_id}: {e}")
-
-async def handle_order_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    if not query:
-        return
-
-    await query.answer()
-
-    data = query.data.split(":")
-    action = data[0]
-    user_id = int(data[1])
-    admin_name = update.effective_user.first_name or "Admin"
-    time_str = datetime.now().strftime("%I:%M %p")
-
-    msg = query.message
-    base_text = (msg.text or "Order Details").split("💬 Tap below")[0].strip()
-
-    if action == "confirm_order":
-        updated_card = (
-            f"{base_text}\n\n"
-            f"────────────────────\n"
-            f"✅ PAYMENT CONFIRMED by {admin_name} at {time_str}"
-        )
-        try:
-            await context.bot.edit_message_text(
-                chat_id=msg.chat.id,
-                message_id=msg.message_id,
-                text=updated_card,
-                reply_markup=None
-            )
-        except Exception as e:
-            logging.error(f"Failed to edit admin card: {e}")
-
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "🌸 *Piece & Petal — ការទូទាត់ប្រាក់ត្រូវបានផ្ទៀងផ្ទាត់!* 🎉\n\n"
-                    "ការទូទាត់ប្រាក់របស់បងទទួលបានជោគជ័យហើយ។ "
-                    "ក្រុមការងារកំពុងរៀបចំវេចខ្ចប់ទំនិញជូនបង និងទាក់ទងមុនពេលដឹកជញ្ជូនណា៎ ✨"
-                ),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.error(f"Failed to send confirmation DM to {user_id}: {e}")
-
-    elif action == "reject_order":
-        updated_card = (
-            f"{base_text}\n\n"
-            f"────────────────────\n"
-            f"❌ PAYMENT REJECTED by {admin_name} at {time_str}"
-        )
-        try:
-            await context.bot.edit_message_text(
-                chat_id=msg.chat.id,
-                message_id=msg.message_id,
-                text=updated_card,
-                reply_markup=None
-            )
-        except Exception as e:
-            logging.error(f"Failed to edit admin card: {e}")
-
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    "⚠️ *Piece & Petal — ការទូទាត់ប្រាក់មិនទាន់ត្រឹមត្រូវ*\n\n"
-                    "សូមអភ័យទោសបង ក្រុមការងារមិនទាន់អាចផ្ទៀងផ្ទាត់ Slip ផ្ទេរប្រាក់បាននៅឡើយទេ។ "
-                    "សូមបងផ្ញើរូបភាព Slip ចូលមកក្នុង Chat នេះម្តងទៀតដើម្បីឱ្យក្រុមការងារជួយពិនិត្យជូនណា៎ 🙏"
-                ),
-                parse_mode="Markdown"
-            )
-        except Exception as e:
-            logging.error(f"Failed to send rejection DM to {user_id}: {e}")
-
-async def update_worker():
-    while True:
-        try:
-            update = await update_queue.get()
-            await tg_app.process_update(update)
-            update_queue.task_done()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logging.error(f"Worker exception processing update: {e}")
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global tg_app, update_queue
-    update_queue = asyncio.Queue()
-
-    tg_app = Application.builder().token(BOT_TOKEN).build()
-
-    tg_app.add_handler(CommandHandler("start", start))
-    tg_app.add_handler(CallbackQueryHandler(handle_order_actions, pattern="^(confirm_order|reject_order):"))
-    # Captures text, photos, and document receipts from customers
-    tg_app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND, forward_to_admin_topic))
-    tg_app.add_handler(MessageHandler(filters.Chat(ADMIN_GROUP_ID) & ~filters.COMMAND, reply_from_admin_topic))
-
-    await tg_app.initialize()
-    await tg_app.start()
-
-    worker_task = asyncio.create_task(update_worker())
-
-    webhook_url = f"{RENDER_URL}/telegram-webhook"
-    await tg_app.bot.set_webhook(
-        url=webhook_url,
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES
-    )
-    logging.info(f"Webhook registered: {webhook_url}")
-
-    yield
-
-    worker_task.cancel()
-    await tg_app.stop()
-    await tg_app.shutdown()
-
-api = FastAPI(lifespan=lifespan)
-
-if os.path.exists("templates"):
-    api.mount("/static", StaticFiles(directory="templates"), name="static")
-
-@api.post("/telegram-webhook")
-async def telegram_webhook(request: Request):
-    try:
-        req_data = await request.json()
-        update = Update.de_json(req_data, tg_app.bot)
-        update_queue.put_nowait(update)
-    except Exception as e:
-        logging.error(f"Error parsing incoming webhook: {e}")
-    return Response(status_code=200)
-
-@api.api_route("/", methods=["GET", "HEAD"])
-@api.api_route("/health", methods=["GET", "HEAD"])
-async def health_check():
-    return JSONResponse({"status": "ok", "app": "Piece & Petal Combined Service"})
-
-@api.get("/shop", response_class=HTMLResponse)
-def serve_shop():
-    if os.path.exists("templates/index.html"):
-        with open("templates/index.html", "r", encoding="utf-8") as f:
-            return f.read()
-    return "<h3>templates/index.html not found.</h3>"
-
-@api.get("/api/products")
-async def get_products():
-    try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(CSV_EXPORT_URL)
-            resp.raise_for_status()
-
-        f = io.StringIO(resp.text)
-        reader = csv.DictReader(f)
-        items = []
-
-        for row in reader:
-            clean_row = {(k.strip().lower() if k else ''): (v.strip() if v else '') for k, v in row.items()}
-            prod_id = clean_row.get("id")
-            title = clean_row.get("title")
-            if not prod_id or not title:
-                continue
-
-            raw_price = clean_row.get("price", "0")
-            try:
-                price_val = float(str(raw_price).replace("$", "").strip())
-            except ValueError:
-                price_val = 0.0
-
-            items.append({
-                "id": prod_id,
-                "title": title,
-                "brand": clean_row.get("brand", "Tokyo Sourcing"),
-                "category": clean_row.get("category", "General"),
-                "price": price_val,
-                "availability": clean_row.get("availability", "In Stock"),
-                "size": clean_row.get("size", "-"),
-                "image": clean_row.get("image", ""),
-                "tag": clean_row.get("tag", ""),
-                "description": clean_row.get("description", "Authentic Japanese product curated directly from Tokyo.")
-            })
-        return items
-    except Exception as e:
-        logging.error(f"Failed to fetch catalog: {e}")
-        return []
-
-@api.post("/api/inquire")
-async def inquire(request: Request):
-    data = await request.json()
-    raw_user_id = data.get("user_id")
-    product_title = data.get("product_title", "Unknown item")
-    customer_name = data.get("customer_name", "Customer")
-
-    user_id = int(raw_user_id) if raw_user_id else None
-    if not user_id:
-        return {"status": "ignored"}
-
-    thread_id = user_to_thread.get(user_id)
-    if not thread_id:
-        try:
-            topic = await tg_app.bot.create_forum_topic(chat_id=ADMIN_GROUP_ID, name=f"🌸 {customer_name[:18]} ({user_id})")
-            thread_id = topic.message_thread_id
-            user_to_thread[user_id] = thread_id
-            thread_to_user[thread_id] = user_id
-            save_threads()
-        except Exception as e:
-            logging.error(f"Failed to create topic on inquiry: {e}")
-
-    inquiry_msg = (
-        f"🙋 *PRODUCT INQUIRY*\n"
-        f"────────────────────\n"
-        f"Customer asked about:\n"
-        f"👉 *{product_title}*\n\n"
-        f"💬 Reply in this topic to chat with the customer."
-    )
-
-    try:
-        if thread_id:
-            await tg_app.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                message_thread_id=thread_id,
-                text=inquiry_msg,
-                parse_mode="Markdown"
-            )
-            await tg_app.bot.send_message(
-                chat_id=user_id,
-                text=f"🌸 បងចង់សាកសួរពី *{product_title}* មែនទេ? សូមបងផ្ញើសំណួរមកទីនេះ ក្រុមការងារនឹងឆ្លើយតបជូនភ្លាមៗណា៎ ✨",
-                parse_mode="Markdown"
-            )
-    except Exception as e:
-        logging.error(f"Error routing inquiry: {e}")
-
-    return {"status": "ok"}
-
-@api.post("/api/checkout")
-async def checkout(request: Request):
-    data = await request.json()
-    raw_user_id = data.get("user_id")
-    order_summary = data.get("summary", "")
-    customer_name = data.get("customer_name", "Guest")
-    phone = data.get("phone", "N/A")
-    address = data.get("address", "N/A")
-    total = data.get("total", 0.0)
-
-    user_id = int(raw_user_id) if raw_user_id else None
-    thread_id = None
-
-    if user_id:
-        save_customer(user_id)
-        if user_id in user_to_thread:
-            thread_id = user_to_thread[user_id]
-        else:
-            try:
-                topic = await tg_app.bot.create_forum_topic(
-                    chat_id=ADMIN_GROUP_ID,
-                    name=f"🌸 {customer_name[:18]} ({user_id})"
-                )
-                thread_id = topic.message_thread_id
-                user_to_thread[user_id] = thread_id
-                thread_to_user[thread_id] = user_id
-                save_threads()
-            except Exception as e:
-                logging.error(f"Error creating topic during checkout: {e}")
-
-    if ORDER_WEBHOOK_URL:
-        try:
-            order_payload = {
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "customer_name": customer_name,
-                "user_id": str(user_id or "Direct Web"),
-                "phone": phone,
-                "address": address,
-                "total": total,
-                "summary": order_summary
-            }
-            async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                await client.post(ORDER_WEBHOOK_URL, json=order_payload)
-        except Exception as e:
-            logging.error(f"Google Sheet logging error: {repr(e)}")
-
-    keyboard = None
-    if user_id:
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Confirm Payment", callback_data=f"confirm_order:{user_id}"),
-                InlineKeyboardButton("❌ Invalid / Reject", callback_data=f"reject_order:{user_id}")
-            ]
-        ])
-
-    order_card = (
-        f"🛍️ *NEW IN-APP ORDER SUBMITTED*\n"
-        f"────────────────────\n"
-        f"• Customer: {customer_name}\n"
-        f"• Telegram ID: `{user_id if user_id else 'Direct Web'}`\n"
-        f"• Phone: `{phone}`\n"
-        f"• Location: {address}\n"
-        f"• Total: *${total:.2f}*\n\n"
-        f"*Items:*\n{order_summary}\n"
-        f"────────────────────\n"
-        f"💬 Tap below to confirm or reject payment:"
-    )
-
-    try:
-        if thread_id:
-            await tg_app.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                message_thread_id=thread_id,
-                text=order_card,
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
-            # Direct prompt in customer's chat asking for the slip
-            await tg_app.bot.send_message(
-                chat_id=user_id,
-                text=(
-                    f"🌸 *Piece & Petal Order Received!*\n\n"
-                    f"អរគុណបង {customer_name}! ក្រុមការងារបានទទួលការបញ្ជាទិញតម្លៃ *${total:.2f}* រួចរាល់ហើយ។\n\n"
-                    f"📸 *សូមបងផ្ញើរូបភាព Slip ផ្ទេរប្រាក់មកក្នុង Chat នេះ* ដើម្បីឱ្យក្រុមការងារជួយពិនិត្យ និងរៀបចំឥវ៉ាន់ជូនបងណា៎ ✨"
-                ),
-                parse_mode="Markdown"
-            )
-        else:
-            await tg_app.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                text=order_card,
-                parse_mode="Markdown",
-                reply_markup=keyboard
-            )
-    except Exception as e:
-        logging.error(f"Error sending order alert: {e}")
-
-    return {"status": "success"}
-
-if __name__ == "__main__":
-    uvicorn.run("bot:api", host="0.0.0.0", port=PORT, log_level="info")
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Piece & Petal — Tokyo Drops</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Plus Jakarta Sans', sans-serif; }
+    .hide-scrollbar::-webkit-scrollbar { display: none; }
+    .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+  </style>
+</head>
+<body class="bg-[#FAF8F5] text-stone-800 pb-28 antialiased selection:bg-stone-200">
+
+  <!-- Header -->
+  <header class="sticky top-0 z-30 bg-[#FAF8F5]/90 backdrop-blur-md px-5 py-4 border-b border-stone-200/60 flex items-center justify-between">
+    <div>
+      <h1 class="text-lg font-bold tracking-tight text-stone-900">Piece & Petal</h1>
+      <p class="text-[11px] font-medium text-stone-500 uppercase tracking-wider">Tokyo Sourcing • Drop 01</p>
+    </div>
+    <span class="inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200">
+      100% Tokyo Authentic
+    </span>
+  </header>
+
+  <!-- Filter Bar -->
+  <div class="sticky top-[69px] z-20 bg-[#FAF8F5]/90 backdrop-blur-md px-5 py-3 border-b border-stone-100 flex flex-col space-y-2">
+    <div id="category-bar" class="flex space-x-2 overflow-x-auto hide-scrollbar"></div>
+  </div>
+
+  <!-- Product Grid -->
+  <main class="p-5">
+    <div id="product-grid" class="grid grid-cols-2 gap-4">
+      <div class="col-span-2 text-center py-16 text-xs text-stone-400">Loading catalog...</div>
+    </div>
+  </main>
+
+  <!-- Product Detail Drawer -->
+  <div id="detail-modal" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm hidden flex items-end">
+    <div class="bg-white w-full rounded-t-3xl max-h-[92vh] overflow-y-auto p-6 space-y-5 hide-scrollbar">
+      <div class="flex justify-between items-center pb-2 border-b border-stone-100">
+        <span id="p-brand-badge" class="px-2.5 py-1 rounded-full text-xs font-bold bg-stone-100 text-stone-700"></span>
+        <button onclick="closeDetail()" class="text-stone-400 hover:text-stone-700 text-sm font-semibold p-1">✕</button>
+      </div>
+
+      <div class="aspect-square w-full bg-[#FAF8F5] rounded-2xl overflow-hidden border border-stone-100">
+        <img id="p-detail-img" src="" alt="Product" class="w-full h-full object-contain">
+      </div>
+
+      <div>
+        <h2 id="p-detail-title" class="text-lg font-bold text-stone-900 leading-snug"></h2>
+        <p id="p-detail-price" class="text-2xl font-extrabold text-stone-900 mt-1"></p>
+      </div>
+
+      <div class="grid grid-cols-2 gap-2 text-[11px] font-semibold text-stone-600">
+        <div class="bg-stone-50 border border-stone-200/70 p-2.5 rounded-xl flex items-center space-x-2">
+          <span>🚚</span>
+          <span>Phnom Penh 1–2 days</span>
+        </div>
+        <div class="bg-stone-50 border border-stone-200/70 p-2.5 rounded-xl flex items-center space-x-2">
+          <span>📦</span>
+          <span>Provinces via VET</span>
+        </div>
+        <div class="bg-stone-50 border border-stone-200/70 p-2.5 rounded-xl flex items-center space-x-2">
+          <span>✓</span>
+          <span>100% Tokyo Authentic</span>
+        </div>
+        <div class="bg-stone-50 border border-stone-200/70 p-2.5 rounded-xl flex items-center space-x-2">
+          <span>💵</span>
+          <span>KHQR or COD Available</span>
+        </div>
+      </div>
+
+      <div class="space-y-2 pt-2">
+        <div class="grid grid-cols-2 gap-3">
+          <button id="p-add-cart-btn" class="w-full py-3.5 bg-stone-900 text-white rounded-xl text-xs font-bold active:scale-[0.98] transition">
+            Add to Cart
+          </button>
+          <button id="p-buy-now-btn" class="w-full py-3.5 bg-amber-400 hover:bg-amber-500 text-stone-900 rounded-xl text-xs font-bold active:scale-[0.98] transition">
+            Place Order Now
+          </button>
+        </div>
+        <button onclick="askAboutProduct()" class="w-full py-3 text-xs font-semibold text-stone-600 hover:text-stone-900 flex items-center justify-center space-x-1">
+          <span>💬</span>
+          <span>Ask about this product</span>
+        </button>
+      </div>
+
+      <div class="space-y-2 border-t border-stone-100 pt-4">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-stone-400">Description</h3>
+        <p id="p-detail-desc" class="text-xs text-stone-600 leading-relaxed"></p>
+      </div>
+
+      <div class="space-y-2 border-t border-stone-100 pt-4">
+        <h3 class="text-xs font-bold uppercase tracking-wider text-stone-400">Specifications</h3>
+        <div class="grid grid-cols-2 gap-y-2 text-xs py-2">
+          <span class="text-stone-400">Brand</span>
+          <span id="spec-brand" class="font-medium text-stone-800"></span>
+          <span class="text-stone-400">Category</span>
+          <span id="spec-category" class="font-medium text-stone-800"></span>
+          <span class="text-stone-400">Size / Volume</span>
+          <span id="spec-size" class="font-medium text-stone-800"></span>
+          <span class="text-stone-400">Availability</span>
+          <span id="spec-avail" class="font-medium text-stone-800"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom Cart Sticky Bar -->
+  <div id="cart-bar" class="fixed bottom-4 inset-x-4 max-w-md mx-auto hidden z-40">
+    <button onclick="openCheckout()" class="w-full bg-stone-900 text-white p-4 rounded-2xl shadow-xl flex items-center justify-between font-medium active:scale-[0.98] transition">
+      <div class="flex items-center space-x-2">
+        <span id="cart-count-badge" class="bg-stone-700 text-[11px] px-2 py-0.5 rounded-full font-semibold">0</span>
+        <span class="text-sm font-semibold">View Selected Items</span>
+      </div>
+      <span id="cart-total-display" class="text-sm font-semibold">$0.00</span>
+    </button>
+  </div>
+
+  <!-- Checkout Drawer -->
+  <div id="checkout-modal" class="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm hidden flex items-end">
+    <div class="bg-white w-full rounded-t-3xl max-h-[92vh] overflow-y-auto p-6 space-y-5 hide-scrollbar">
+      <div class="flex justify-between items-center pb-2 border-b border-stone-100">
+        <div>
+          <h2 class="text-base font-semibold text-stone-900">Checkout</h2>
+          <p class="text-[11px] text-stone-400">Choose payment method & address</p>
+        </div>
+        <button onclick="closeCheckout()" class="text-stone-400 hover:text-stone-700 text-sm font-medium">Close</button>
+      </div>
+
+      <div id="order-items-list" class="divide-y divide-stone-100 text-sm"></div>
+
+      <div class="space-y-3 pt-2">
+        <div>
+          <label class="text-[11px] font-semibold text-stone-500 uppercase">Your Name</label>
+          <input type="text" id="cust-name" placeholder="Name" class="w-full mt-1 p-3 border border-stone-200 rounded-xl text-sm outline-none focus:border-stone-800">
+        </div>
+        <div>
+          <label class="text-[11px] font-semibold text-stone-500 uppercase">Phone Number <span class="text-rose-500">*</span></label>
+          <input type="tel" id="cust-phone" placeholder="012 345 678" class="w-full mt-1 p-3 border border-stone-200 rounded-xl text-sm outline-none focus:border-stone-800">
+        </div>
+        <div>
+          <label class="text-[11px] font-semibold text-stone-500 uppercase">Delivery Location <span class="text-rose-500">*</span></label>
+          <input type="text" id="cust-address" placeholder="Phnom Penh address / Province" class="w-full mt-1 p-3 border border-stone-200 rounded-xl text-sm outline-none focus:border-stone-800">
+        </div>
+      </div>
+
+      <!-- Payment Method Switcher -->
+      <div class="space-y-2 pt-1">
+        <label class="text-[11px] font-semibold text-stone-500 uppercase">Payment Method</label>
+        <div class="grid grid-cols-2 gap-2">
+          <button type="button" id="pay-opt-khqr" onclick="setPaymentMethod('KHQR')" class="p-3 rounded-xl border-2 text-xs font-bold flex flex-col items-center justify-center space-y-1 transition border-stone-900 bg-stone-900 text-white shadow-sm">
+            <span class="text-base">💳</span>
+            <span>ABA / KHQR (Pay Now)</span>
+          </button>
+          <button type="button" id="pay-opt-cod" onclick="setPaymentMethod('COD')" class="p-3 rounded-xl border-2 text-xs font-bold flex flex-col items-center justify-center space-y-1 transition border-stone-200 bg-stone-50 text-stone-600 hover:bg-stone-100">
+            <span class="text-base">💵</span>
+            <span>Cash on Delivery</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Panel 1: KHQR Payment Details -->
+      <div id="khqr-box" class="p-4 bg-[#F8F9FA] rounded-2xl border border-stone-200 text-center space-y-3">
+        <div class="flex items-center justify-between px-1">
+          <p class="text-xs font-bold uppercase tracking-wider text-stone-800">Transfer Payment</p>
+          <span class="text-[10px] font-bold text-sky-800 bg-sky-100 px-2 py-0.5 rounded-full">ABA • KHQR</span>
+        </div>
+
+        <div class="bg-white p-3 rounded-xl border border-stone-200 shadow-sm flex items-center justify-between">
+          <span class="text-xs text-stone-500 font-medium">Total to transfer:</span>
+          <span id="transfer-amount-display" class="text-base font-extrabold text-stone-900">$0.00</span>
+        </div>
+
+        <div class="w-48 h-48 mx-auto bg-white p-2.5 rounded-xl shadow-sm border border-stone-200 flex items-center justify-center overflow-hidden">
+          <img id="qr-img-tag" src="/static/khqr.png" alt="Piece & Petal KHQR" class="w-full h-full object-contain">
+        </div>
+
+        <div class="grid grid-cols-2 gap-2 pt-1">
+          <button type="button" onclick="saveOrOpenQr()" class="py-2.5 px-3 bg-white border border-stone-300 hover:bg-stone-50 active:scale-[0.98] rounded-xl text-xs font-semibold text-stone-800 shadow-sm flex items-center justify-center space-x-1.5 transition">
+            <span>💾</span>
+            <span>Save / View QR</span>
+          </button>
+          
+          <button type="button" id="copy-acc-btn" onclick="copyAccountNumber()" class="py-2.5 px-3 bg-white border border-stone-300 hover:bg-stone-50 active:scale-[0.98] rounded-xl text-xs font-semibold text-stone-800 shadow-sm flex items-center justify-center space-x-1.5 transition">
+            <span>📋</span>
+            <span id="copy-btn-label">Copy ABA No.</span>
+          </button>
+        </div>
+
+        <div class="p-2.5 bg-sky-50/70 rounded-xl border border-sky-150 text-[11px] text-sky-900 text-left space-y-1">
+          <p class="font-bold flex items-center justify-between">
+            <span>ABA: KEVIN KEO</span>
+            <span class="font-mono font-bold text-sky-950">010 799 300</span>
+          </p>
+          <p class="text-[10px] text-sky-700 leading-tight">
+            សូមផ្ទេររួចផ្ញើ Slip ចូល Chat បន្ទាប់ពី Submit ការបញ្ជាទិញ។
+          </p>
+        </div>
+      </div>
+
+      <!-- Panel 2: Cash On Delivery Notice -->
+      <div id="cod-box" class="hidden p-4 bg-amber-50/80 rounded-2xl border border-amber-200 text-left space-y-2">
+        <div class="flex items-center space-x-2">
+          <span class="text-lg">📦</span>
+          <span class="text-xs font-bold text-amber-950 uppercase tracking-wide">Cash on Delivery (COD)</span>
+        </div>
+        <p class="text-xs text-amber-900 leading-relaxed">
+          បងអាចទូទាត់ប្រាក់សុទ្ធផ្ទាល់នៅពេលដែលអ្នកដឹកជញ្ជូនយកឥវ៉ាន់ទៅដល់ទីតាំងរបស់បង។
+        </p>
+        <div class="bg-white/80 p-2.5 rounded-xl border border-amber-200/60 text-[11px] text-amber-800 flex items-center justify-between">
+          <span>Amount due upon delivery:</span>
+          <span id="cod-amount-display" class="font-bold text-stone-900 text-sm">$0.00</span>
+        </div>
+        <p class="text-[10px] text-amber-700">
+          * សេវាដឹកជញ្ជូនរៀបចំតាមរយៈក្រុមហ៊ុនដឹកជញ្ជូនក្នុងរាជធានីភ្នំពេញ និងខេត្ត។
+        </p>
+      </div>
+
+      <button id="submit-btn" onclick="submitOrder()" class="w-full bg-stone-900 hover:bg-stone-800 text-white py-4 rounded-xl text-sm font-semibold active:scale-[0.98] transition">
+        I Have Transferred • Send Slip
+      </button>
+    </div>
+  </div>
+
+  <!-- Success Confirmation Screen -->
+  <div id="success-screen" class="fixed inset-0 z-50 bg-[#FAF8F5] hidden flex flex-col items-center justify-center p-6 text-center">
+    <div class="w-16 h-16 bg-emerald-100 text-emerald-600 rounded-full flex items-center justify-center mb-4 text-2xl font-bold">✓</div>
+    <h2 id="success-title" class="text-xl font-bold text-stone-900">Order Submitted!</h2>
+    <p id="success-desc" class="text-sm text-stone-600 mt-2 max-w-xs leading-relaxed">
+      អរគុណបង! សូមផ្ញើរូបភាព Slip ផ្ទេរប្រាក់ចូលក្នុង Chat នេះ ដើម្បីក្រុមការងារផ្ទៀងផ្ទាត់ និងរៀបចំឥវ៉ាន់ជូនបងភ្លាមៗណា៎ ✨
+    </p>
+    <button onclick="dismissSuccess()" class="mt-8 w-full max-w-xs py-3.5 bg-stone-900 text-white rounded-xl text-sm font-semibold active:scale-[0.98] transition">
+      Back to Chat
+    </button>
+  </div>
+
+  <script>
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.expand();
+      tg.ready();
+    }
+
+    const ABA_ACCOUNT_NUMBER = "010799300";
+
+    let allProducts = [];
+    let activeFilter = 'All';
+    let cart = {};
+    let selectedProduct = null;
+    let paymentMethod = 'KHQR'; // 'KHQR' or 'COD'
+
+    document.addEventListener("DOMContentLoaded", () => {
+      if (localStorage.getItem('p_phone')) {
+        document.getElementById('cust-phone').value = localStorage.getItem('p_phone');
+      }
+      if (localStorage.getItem('p_address')) {
+        document.getElementById('cust-address').value = localStorage.getItem('p_address');
+      }
+      if (localStorage.getItem('p_name')) {
+        document.getElementById('cust-name').value = localStorage.getItem('p_name');
+      }
+    });
+
+    function setPaymentMethod(method) {
+      paymentMethod = method;
+      const khqrBtn = document.getElementById('pay-opt-khqr');
+      const codBtn = document.getElementById('pay-opt-cod');
+      const khqrBox = document.getElementById('khqr-box');
+      const codBox = document.getElementById('cod-box');
+      const submitBtn = document.getElementById('submit-btn');
+
+      if (method === 'KHQR') {
+        khqrBtn.className = "p-3 rounded-xl border-2 text-xs font-bold flex flex-col items-center justify-center space-y-1 transition border-stone-900 bg-stone-900 text-white shadow-sm";
+        codBtn.className = "p-3 rounded-xl border-2 text-xs font-bold flex flex-col items-center justify-center space-y-1 transition border-stone-200 bg-stone-50 text-stone-600 hover:bg-stone-100";
+        khqrBox.classList.remove('hidden');
+        codBox.classList.add('hidden');
+        submitBtn.innerText = "I Have Transferred • Send Slip";
+      } else {
+        codBtn.className = "p-3 rounded-xl border-2 text-xs font-bold flex flex-col items-center justify-center space-y-1 transition border-stone-900 bg-stone-900 text-white shadow-sm";
+        khqrBtn.className = "p-3 rounded-xl border-2 text-xs font-bold flex flex-col items-center justify-center space-y-1 transition border-stone-200 bg-stone-50 text-stone-600 hover:bg-stone-100";
+        khqrBox.classList.add('hidden');
+        codBox.classList.remove('hidden');
+        submitBtn.innerText = "Confirm Order (Cash on Delivery)";
+      }
+    }
+
+    function saveOrOpenQr() {
+      const qrUrl = window.location.origin + "/static/khqr.png";
+      if (tg && tg.openLink) {
+        tg.openLink(qrUrl);
+      } else {
+        window.open(qrUrl, '_blank');
+      }
+    }
+
+    function copyAccountNumber() {
+      navigator.clipboard.writeText(ABA_ACCOUNT_NUMBER).then(() => {
+        const btnLabel = document.getElementById('copy-btn-label');
+        const originalText = btnLabel.innerText;
+        btnLabel.innerText = "Copied!";
+        btnLabel.parentElement.classList.add('bg-emerald-50', 'text-emerald-700', 'border-emerald-300');
+        
+        setTimeout(() => {
+          btnLabel.innerText = originalText;
+          btnLabel.parentElement.classList.remove('bg-emerald-50', 'text-emerald-700', 'border-emerald-300');
+        }, 2000);
+      }).catch(() => {
+        alert("Account: " + ABA_ACCOUNT_NUMBER);
+      });
+    }
+
+    async function fetchCatalog() {
+      try {
+        const res = await fetch('/api/products');
+        allProducts = await res.json();
+        renderCategories();
+        renderProducts();
+      } catch (err) {
+        document.getElementById('product-grid').innerHTML = `
+          <div class="col-span-2 text-center py-16 text-xs text-rose-500">Catalog sync failed. Pull down to refresh.</div>
+        `;
+      }
+    }
+
+    function renderCategories() {
+      const categories = ['All', ...new Set(allProducts.map(p => p.category).filter(Boolean))];
+      const catBar = document.getElementById('category-bar');
+
+      catBar.innerHTML = categories.map(cat => {
+        const isActive = cat === activeFilter;
+        return `
+          <button onclick="setCategory('${cat}')" class="whitespace-nowrap px-4 py-1.5 rounded-full text-xs font-semibold border transition ${
+            isActive ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-600 border-stone-200 hover:bg-stone-50'
+          }">
+            ${cat}
+          </button>
+        `;
+      }).join('');
+    }
+
+    function setCategory(cat) {
+      activeFilter = cat;
+      renderCategories();
+      renderProducts();
+    }
+
+    function renderProducts() {
+      const filtered = activeFilter === 'All' 
+        ? allProducts 
+        : allProducts.filter(p => p.category.toLowerCase() === activeFilter.toLowerCase());
+
+      const grid = document.getElementById('product-grid');
+
+      if (filtered.length === 0) {
+        grid.innerHTML = `<div class="col-span-2 text-center py-16 text-xs text-stone-400">No items available in this category.</div>`;
+        return;
+      }
+
+      grid.innerHTML = filtered.map(p => {
+        const isSoldOut = p.availability?.toLowerCase().includes('sold') || Number(p.price) === 0;
+
+        return `
+          <div onclick="openDetail('${p.id}')" class="bg-white rounded-2xl border border-stone-200/70 overflow-hidden flex flex-col justify-between shadow-sm cursor-pointer active:scale-[0.99] transition">
+            <div class="aspect-square w-full bg-stone-50 relative overflow-hidden">
+              <img src="${p.image}" alt="${p.title}" class="w-full h-full object-cover ${isSoldOut ? 'opacity-40 grayscale' : ''}" onerror="this.src='https://placehold.co/400x400/faf8f5/stone?text=Piece+%26+Petal'">
+              ${p.tag ? `
+                <span class="absolute top-2 left-2 text-[9px] font-bold uppercase tracking-wider ${isSoldOut ? 'bg-rose-50 text-rose-700 border border-rose-200' : 'bg-white/90 text-stone-800'} backdrop-blur-sm px-2 py-0.5 rounded-md shadow-sm">
+                  ${p.tag}
+                </span>
+              ` : ''}
+              <span class="absolute bottom-2 right-2 text-[10px] font-medium bg-black/40 text-white backdrop-blur-md px-1.5 py-0.5 rounded">
+                ${p.brand}
+              </span>
+            </div>
+            <div class="p-3.5 space-y-2 flex-1 flex flex-col justify-between">
+              <div>
+                <p class="text-xs font-semibold text-stone-900 leading-snug line-clamp-2">${p.title}</p>
+                <p class="text-xs font-bold text-stone-900 mt-1">$${Number(p.price).toFixed(2)}</p>
+              </div>
+              <button onclick="event.stopPropagation(); ${isSoldOut ? '' : `changeQty('${p.id}', 1)`}" ${isSoldOut ? 'disabled' : ''} class="w-full py-2 bg-stone-50 hover:bg-stone-100 border border-stone-200 rounded-lg text-xs font-medium text-stone-800 active:scale-[0.97] transition ${isSoldOut ? 'cursor-not-allowed opacity-40' : ''}">
+                ${isSoldOut ? 'Sold Out' : '+ Add to Bag'}
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function openDetail(id) {
+      selectedProduct = allProducts.find(p => p.id === id);
+      if (!selectedProduct) return;
+
+      const isSoldOut = selectedProduct.availability?.toLowerCase().includes('sold');
+
+      document.getElementById('p-brand-badge').innerText = selectedProduct.brand || 'Tokyo Import';
+      document.getElementById('p-detail-img').src = selectedProduct.image;
+      document.getElementById('p-detail-title').innerText = selectedProduct.title;
+      document.getElementById('p-detail-price').innerText = `$${Number(selectedProduct.price).toFixed(2)}`;
+      document.getElementById('p-detail-desc').innerText = selectedProduct.description || 'Curated Japanese item.';
+
+      document.getElementById('spec-brand').innerText = selectedProduct.brand || '-';
+      document.getElementById('spec-category').innerText = selectedProduct.category || '-';
+      document.getElementById('spec-size').innerText = selectedProduct.size || '-';
+      document.getElementById('spec-avail').innerText = selectedProduct.availability || 'In Stock';
+
+      const addBtn = document.getElementById('p-add-cart-btn');
+      const buyBtn = document.getElementById('p-buy-now-btn');
+
+      if (isSoldOut) {
+        addBtn.disabled = true;
+        buyBtn.disabled = true;
+        addBtn.innerText = 'Sold Out';
+        buyBtn.innerText = 'Sold Out';
+        addBtn.className = 'w-full py-3.5 bg-stone-200 text-stone-400 rounded-xl text-xs font-bold cursor-not-allowed';
+        buyBtn.className = 'w-full py-3.5 bg-stone-200 text-stone-400 rounded-xl text-xs font-bold cursor-not-allowed';
+      } else {
+        addBtn.disabled = false;
+        buyBtn.disabled = false;
+        addBtn.innerText = 'Add to Cart';
+        buyBtn.innerText = 'Place Order Now';
+        addBtn.className = 'w-full py-3.5 bg-stone-900 text-white rounded-xl text-xs font-bold active:scale-[0.98] transition';
+        buyBtn.className = 'w-full py-3.5 bg-amber-400 text-stone-900 rounded-xl text-xs font-bold active:scale-[0.98] transition';
+
+        addBtn.onclick = () => {
+          changeQty(selectedProduct.id, 1);
+          closeDetail();
+        };
+
+        buyBtn.onclick = () => {
+          cart = { [selectedProduct.id]: 1 };
+          updateCartBar();
+          closeDetail();
+          openCheckout();
+        };
+      }
+
+      document.getElementById('detail-modal').classList.remove('hidden');
+    }
+
+    function closeDetail() {
+      document.getElementById('detail-modal').classList.add('hidden');
+    }
+
+    async function askAboutProduct() {
+      if (!selectedProduct) return;
+      const userId = tg?.initDataUnsafe?.user?.id;
+      const userName = tg?.initDataUnsafe?.user?.first_name || 'Customer';
+
+      try {
+        await fetch('/api/inquire', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: userId,
+            customer_name: userName,
+            product_title: selectedProduct.title
+          })
+        });
+      } catch (err) {
+        console.error(err);
+      }
+
+      if (tg) {
+        tg.close();
+      }
+    }
+
+    function changeQty(id, delta) {
+      const next = (cart[id] || 0) + delta;
+      if (next <= 0) delete cart[id];
+      else cart[id] = next;
+
+      updateCartBar();
+      if (!document.getElementById('checkout-modal').classList.contains('hidden')) {
+        renderOrderItems();
+      }
+    }
+
+    function updateCartBar() {
+      const totalItems = Object.values(cart).reduce((a, b) => a + b, 0);
+      let totalPrice = 0;
+      for (const [id, qty] of Object.entries(cart)) {
+        const prod = allProducts.find(p => p.id === id);
+        if (prod) totalPrice += prod.price * qty;
+      }
+
+      const bar = document.getElementById('cart-bar');
+      if (totalItems > 0) {
+        bar.classList.remove('hidden');
+        document.getElementById('cart-count-badge').innerText = `${totalItems} items`;
+        document.getElementById('cart-total-display').innerText = `$${totalPrice.toFixed(2)}`;
+      } else {
+        bar.classList.add('hidden');
+        closeCheckout();
+      }
+    }
+
+    function renderOrderItems() {
+      const list = document.getElementById('order-items-list');
+      let html = '';
+      let total = 0;
+
+      for (const [id, qty] of Object.entries(cart)) {
+        const p = allProducts.find(prod => prod.id === id);
+        if (p) {
+          const itemTotal = p.price * qty;
+          total += itemTotal;
+          html += `
+            <div class="py-3 flex justify-between items-center">
+              <div class="pr-2 flex-1">
+                <p class="font-medium text-stone-800 text-xs">${p.title}</p>
+                <p class="text-[11px] text-stone-500 mt-0.5">$${p.price.toFixed(2)} each</p>
+              </div>
+              <div class="flex items-center space-x-3">
+                <div class="flex items-center border border-stone-200 rounded-lg bg-stone-50">
+                  <button onclick="changeQty('${p.id}', -1)" class="w-7 h-7 flex items-center justify-center text-stone-600 hover:text-stone-900 font-bold active:bg-stone-200 rounded-l-lg transition">-</button>
+                  <span class="w-6 text-center text-xs font-semibold text-stone-800">${qty}</span>
+                  <button onclick="changeQty('${p.id}', 1)" class="w-7 h-7 flex items-center justify-center text-stone-600 hover:text-stone-900 font-bold active:bg-stone-200 rounded-r-lg transition">+</button>
+                </div>
+                <span class="font-semibold text-stone-800 text-xs w-14 text-right">$${itemTotal.toFixed(2)}</span>
+              </div>
+            </div>
+          `;
+        }
+      }
+
+      html += `
+        <div class="pt-3 flex justify-between items-center text-sm font-bold text-stone-900 border-t border-stone-200">
+          <span>Subtotal</span>
+          <span>$${total.toFixed(2)}</span>
+        </div>
+      `;
+      list.innerHTML = html;
+
+      const amtDisplay = document.getElementById('transfer-amount-display');
+      const codDisplay = document.getElementById('cod-amount-display');
+      if (amtDisplay) amtDisplay.innerText = `$${total.toFixed(2)}`;
+      if (codDisplay) codDisplay.innerText = `$${total.toFixed(2)}`;
+    }
+
+    function openCheckout() {
+      renderOrderItems();
+      document.getElementById('checkout-modal').classList.remove('hidden');
+    }
+
+    function closeCheckout() {
+      document.getElementById('checkout-modal').classList.add('hidden');
+    }
+
+    async function submitOrder() {
+      const name = document.getElementById('cust-name').value.trim();
+      const phone = document.getElementById('cust-phone').value.trim();
+      const address = document.getElementById('cust-address').value.trim();
+
+      let hasError = false;
+      const phoneInput = document.getElementById('cust-phone');
+      const addressInput = document.getElementById('cust-address');
+
+      if (!phone) {
+        phoneInput.classList.add('border-rose-500', 'bg-rose-50/30');
+        hasError = true;
+      } else {
+        phoneInput.classList.remove('border-rose-500', 'bg-rose-50/30');
+      }
+
+      if (!address) {
+        addressInput.classList.add('border-rose-500', 'bg-rose-50/30');
+        hasError = true;
+      } else {
+        addressInput.classList.remove('border-rose-500', 'bg-rose-50/30');
+      }
+
+      if (hasError) return;
+
+      localStorage.setItem('p_phone', phone);
+      localStorage.setItem('p_address', address);
+      if (name) localStorage.setItem('p_name', name);
+
+      const submitBtn = document.getElementById('submit-btn');
+      submitBtn.disabled = true;
+      submitBtn.innerText = 'Submitting order...';
+
+      let summaryList = [];
+      let total = 0;
+      for (const [id, qty] of Object.entries(cart)) {
+        const p = allProducts.find(prod => prod.id === id);
+        if (p) {
+          total += p.price * qty;
+          summaryList.push(`• ${qty}x ${p.title} ($${(p.price * qty).toFixed(2)})`);
+        }
+      }
+
+      const payload = {
+        user_id: tg?.initDataUnsafe?.user?.id || null,
+        customer_name: name || tg?.initDataUnsafe?.user?.first_name || 'Customer',
+        phone: phone,
+        address: address,
+        total: total,
+        payment_method: paymentMethod, // 'KHQR' or 'COD'
+        summary: summaryList.join('\n')
+      };
+
+      try {
+        const res = await fetch('/api/checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (res.ok) {
+          cart = {};
+          closeCheckout();
+          updateCartBar();
+
+          // Customize confirmation message based on payment method
+          if (paymentMethod === 'COD') {
+            document.getElementById('success-title').innerText = "Order Received (COD)";
+            document.getElementById('success-desc').innerHTML = `
+              អរគុណបង! ក្រុមការងារបានទទួលការបញ្ជាទិញ (ទូទាត់ប្រាក់ពេលទំនិញទៅដល់) រួចរាល់ហើយ។<br><br>
+              យើងខ្ញុំនឹងទាក់ទងបញ្ជាក់ទីតាំង និងជូនដំណឹងមុនពេលចេញដំណើរដឹកជញ្ជូនណា៎ 🚚✨
+            `;
+          } else {
+            document.getElementById('success-title').innerText = "Order Submitted!";
+            document.getElementById('success-desc').innerHTML = `
+              អរគុណបង! សូមផ្ញើរូបភាព Slip ផ្ទេរប្រាក់ចូលក្នុង Chat នេះ ដើម្បីឱ្យក្រុមការងារផ្ទៀងផ្ទាត់ និងរៀបចំឥវ៉ាន់ជូនបងភ្លាមៗណា៎ ✨
+            `;
+          }
+
+          document.getElementById('success-screen').classList.remove('hidden');
+        } else {
+          alert('Failed to submit order. Please message us directly in chat.');
+        }
+      } catch (e) {
+        alert('Network connection error. Please try again.');
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerText = paymentMethod === 'KHQR' ? 'I Have Transferred • Send Slip' : 'Confirm Order (Cash on Delivery)';
+      }
+    }
+
+    function dismissSuccess() {
+      document.getElementById('success-screen').classList.add('hidden');
+      if (tg) tg.close();
+    }
+
+    fetchCatalog();
+  </script>
+</body>
+</html>
